@@ -39,7 +39,7 @@ def main():
         # would then wait for EOF until the game exits. Capture to regular files.
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             process = subprocess.run([str(args.ctl.resolve()), '--socket', str(socket), '--timeout', str(timeout),
-                                      *map(str, words)], env=env, stdout=output, stderr=errors,
+                                      *map(str, words)], env=env, cwd=home, stdout=output, stderr=errors,
                                      timeout=timeout + 15)
             output.seek(0)
             errors.seek(0)

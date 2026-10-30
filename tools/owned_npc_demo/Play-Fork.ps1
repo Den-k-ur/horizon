@@ -28,6 +28,9 @@ $env:HORIZON_HOME=$dataDir
 $socket=Join-Path $dataDir 'control.json'
 & $ctl --socket $socket --timeout 2 status 2>$null|Out-Null
 if($LASTEXITCODE -eq 0){Write-Host 'This fork application is already running.';exit 0}
-& $ctl --socket $socket launch --game $game --world $World --creative --resources $Resources --render-distance 6 --no-pause --wait
-if($LASTEXITCODE){throw 'Could not start the fork. See game-data/control.log.'}
+Push-Location $dataDir
+try {
+    & $ctl --socket $socket launch --game $game --world $World --creative --resources $Resources --render-distance 6 --no-pause --wait
+    if($LASTEXITCODE){throw 'Could not start the fork. See game-data/control.log.'}
+} finally { Pop-Location }
 Write-Host 'Started the Civilization fork. Its worlds are stored only in game-data.'
