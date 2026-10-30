@@ -52,25 +52,28 @@ def check_thrown(host, guest, out):
     for game in (host, guest):
         game('command', command='gamemode survival')
     results = {}
-    for item, kind in (('minecraft:egg', 'Egg'), ('minecraft:ender_pearl', 'EnderPearl'),
-                        ('minecraft:wind_charge', 'WindCharge')):
-        # A clear lane along +X at the guest's eye height, with room to fall.
+    # An egg and a pearl are thrown 16 blocks up at 40 blocks: they fly ~48 ticks, land near +53 and peak ~7 above
+    # the feet. Thrown level they fell after ~24 ticks, and on a slow host (a control request answered every 4-9
+    # ticks, once per frame) that left too few samples. A wind charge has no gravity and flies level.
+    for item, kind, up in (('minecraft:egg', 'Egg', 16), ('minecraft:ender_pearl', 'EnderPearl', 16),
+                           ('minecraft:wind_charge', 'WindCharge', 0)):
+        # A clear lane along +X at the guest's eye height, with room to rise and fall.
         host('command', command=f'fill {x + 2} {y - 7} {z - 2} {x + 60} {y - 7} {z + 2} minecraft:stone')
-        host('command', command=f'fill {x + 2} {y - 6} {z - 2} {x + 60} {y + 3} {z + 2} minecraft:air')
+        host('command', command=f'fill {x + 2} {y - 6} {z - 2} {x + 60} {y + 10} {z + 2} minecraft:air')
         guest('command', command=f'tp @s {x + 0.5:.2f} {y:.2f} {z + 0.5:.2f}')
         guest.wait(20)
         guest('command', command='clear @s')
         guest('command', command=f'item replace entity @s weapon.mainhand with {item}')
         guest.wait(10)
         # The server throws along the rotation it has: let it arrive first.
-        guest.raw('look-at', f'{x + 40:.2f}', f'{y + 1.62:.2f}', f'{z + 0.5:.2f}')
+        guest.raw('look-at', f'{x + 40:.2f}', f'{y + 1.62 + up:.2f}', f'{z + 0.5:.2f}')
         guest.wait(5)
-        guest.raw('use-item')
+        # The throw and its samples in one ctl process, as check_motion's: a ctl process per sample cost more ticks.
+        replies = guest.script(['use-item'] + ['status', 'wait 2'] * 8, every=True)
         samples = []
-        for _ in range(6):
-            shots = [p for p in guest('status')['projectiles'] if p['kind'] == kind]
+        for status in (reply for reply in replies if 'projectiles' in reply):
+            shots = [p for p in status['projectiles'] if p['kind'] == kind]
             samples.append(shots[0]['position'][0] if shots else None)
-            guest.wait(2)
         seen = [p for p in samples if p is not None]
         moves = sum(b != a for a, b in zip(seen, seen[1:]))
         results[item] = {'positions': samples, 'moves': moves}
