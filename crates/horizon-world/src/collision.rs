@@ -11,7 +11,12 @@ use crate::{
     registry::{BlockRegistry, BlockStateId, BlockTable},
 };
 use horizon_core::geometry::{Axis, VoxelShape};
-use std::{collections::HashMap, io};
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    io,
+    sync::{Arc, Mutex, PoisonError, Weak},
+};
 
 #[derive(PartialEq, Eq, Hash)]
 struct GridKey {
@@ -25,11 +30,35 @@ struct GridKey {
 
 pub struct CachedCollisionRegistry<'r> {
     registry: &'r BlockRegistry,
-    shapes: Vec<VoxelShape>,
+    parsed: Arc<ParsedShapes>,
     state_shapes: Vec<i32>,
+}
+
+/// The shapes of one table. Every registry read from the same table shares
+/// them (the level's block data, block support and the client's collisions
+/// all read `cached-collision.nbt`): the same shapes, so the face shapes each
+/// of them asks for are computed and kept once, not once per reader.
+struct ParsedShapes {
+    shapes: Vec<VoxelShape>,
     grid_count: usize,
     canonical_identities: bool,
 }
+
+/// Two hashes and the length of a table's shape list.
+type ShapesKey = (u64, u64, usize);
+
+fn shapes_key(entries: &[Tag]) -> ShapesKey {
+    let hash = |salt: u8| {
+        let mut h = DefaultHasher::new();
+        salt.hash(&mut h);
+        entries.hash(&mut h);
+        h.finish()
+    };
+    (hash(0), hash(1), entries.len())
+}
+
+/// The shape lists parsed and still in use, by [`shapes_key`].
+static PARSED: Mutex<Vec<(ShapesKey, Weak<ParsedShapes>)>> = Mutex::new(Vec::new());
 impl<'r> CachedCollisionRegistry<'r> {
     pub fn registry(&self) -> &'r BlockRegistry {
         self.registry
@@ -48,6 +77,43 @@ impl<'r> CachedCollisionRegistry<'r> {
         if entries.len() > registry.len() {
             return Err(invalid("too many cached collision shapes"));
         }
+        let key = shapes_key(entries);
+        let shared = {
+            let mut parsed = PARSED.lock().unwrap_or_else(PoisonError::into_inner);
+            parsed.retain(|(_, p)| p.strong_count() > 0);
+            parsed
+                .iter()
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, p)| p.upgrade())
+        };
+        let parsed = match shared {
+            Some(parsed) => parsed,
+            None => {
+                let parsed = Arc::new(Self::parse_shapes(entries)?);
+                let mut cache = PARSED.lock().unwrap_or_else(PoisonError::into_inner);
+                cache.push((key, Arc::downgrade(&parsed)));
+                parsed
+            }
+        };
+        let shapes = &parsed.shapes;
+        let Some(Tag::IntArray(state_shapes)) = tag.get("cached_shapes") else {
+            return Err(invalid("missing cached shape mapping"));
+        };
+        if state_shapes.len() != registry.len()
+            || state_shapes
+                .iter()
+                .any(|id| *id < -1 || *id >= shapes.len() as i32)
+        {
+            return Err(invalid("invalid cached shape mapping"));
+        }
+        Ok(Self {
+            registry,
+            state_shapes: state_shapes.clone(),
+            parsed,
+        })
+    }
+
+    fn parse_shapes(entries: &[Tag]) -> io::Result<ParsedShapes> {
         let mut shapes = Vec::with_capacity(entries.len());
         let mut canonical_identities = true;
         let mut seen_canonical = [false; 3];
@@ -174,20 +240,8 @@ impl<'r> CachedCollisionRegistry<'r> {
             grids.entry(key).or_insert_with(|| shape.clone());
             shapes.push(shape);
         }
-        let Some(Tag::IntArray(state_shapes)) = tag.get("cached_shapes") else {
-            return Err(invalid("missing cached shape mapping"));
-        };
-        if state_shapes.len() != registry.len()
-            || state_shapes
-                .iter()
-                .any(|id| *id < -1 || *id >= shapes.len() as i32)
-        {
-            return Err(invalid("invalid cached shape mapping"));
-        }
-        Ok(Self {
-            registry,
+        Ok(ParsedShapes {
             shapes,
-            state_shapes: state_shapes.clone(),
             grid_count: grids.len(),
             canonical_identities,
         })
@@ -195,13 +249,13 @@ impl<'r> CachedCollisionRegistry<'r> {
     /// Older exports omit native canonical identities. Such imports retain their
     /// local alias graph but cannot support identity-dependent world iteration.
     pub fn has_canonical_identities(&self) -> bool {
-        self.canonical_identities
+        self.parsed.canonical_identities
     }
     pub fn shape_count(&self) -> usize {
-        self.shapes.len()
+        self.parsed.shapes.len()
     }
     pub fn unique_grid_count(&self) -> usize {
-        self.grid_count
+        self.parsed.grid_count
     }
     pub fn cached_state_count(&self) -> usize {
         self.state_shapes.iter().filter(|id| **id >= 0).count()
@@ -216,7 +270,7 @@ impl<'r> CachedCollisionRegistry<'r> {
         Ok(if id < 0 {
             None
         } else {
-            Some(&self.shapes[id as usize])
+            Some(&self.parsed.shapes[id as usize])
         })
     }
     pub fn section_shape(

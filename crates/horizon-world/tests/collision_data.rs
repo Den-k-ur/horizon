@@ -339,3 +339,30 @@ fn streamed_tables_check_states_while_reading() {
     let file = BlockTableFile::read(&bytes(&swapped), &registry).unwrap();
     assert!(file.table("collision").is_err());
 }
+
+/// Registries read from the same table share its shapes (and so the face
+/// shapes cached on them); a different table gets its own.
+#[test]
+fn registries_of_one_table_share_its_shapes() {
+    let (registry_tag, collision_tag) = fixture();
+    let registry = BlockRegistry::from_nbt(&registry_tag).unwrap();
+    let a = CachedCollisionRegistry::from_nbt(&collision_tag, &registry).unwrap();
+    let b = CachedCollisionRegistry::from_nbt(&collision_tag, &registry).unwrap();
+    let stone =
+        |r: &CachedCollisionRegistry| r.cached_shape(BlockStateId(1)).unwrap().unwrap().clone();
+    assert!(stone(&a).same_identity(&stone(&b)));
+    let Tag::Compound(mut other) = collision_tag else {
+        unreachable!()
+    };
+    let Some(Tag::List(shapes)) = other.get_mut(&"shapes".into()) else {
+        unreachable!()
+    };
+    shapes.reverse();
+    let c = CachedCollisionRegistry::from_nbt(&Tag::Compound(other), &registry).unwrap();
+    assert!(
+        !c.cached_shape(BlockStateId(0))
+            .unwrap()
+            .unwrap()
+            .same_identity(&stone(&a))
+    );
+}

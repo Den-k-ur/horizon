@@ -24,7 +24,7 @@ pub type Compound = BTreeMap<JavaString, Tag>;
 /// Float and double variants hold their IEEE bit patterns. Java canonicalizes
 /// NaNs on binary output. Loading, like vanilla's valueOf factories, normalizes
 /// negative zero to positive zero.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Tag {
     End,
     Byte(i8),
