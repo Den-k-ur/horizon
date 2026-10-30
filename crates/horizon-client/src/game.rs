@@ -1336,6 +1336,17 @@ impl UiResources {
             panorama: Arc::new(horizon_client::gfx::panorama::Faces::load(root)),
         })
     }
+    /// What a server's game holds, since it draws nothing: the font, which books
+    /// and chat measure with, and a one-pixel panorama.
+    pub fn server(root: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            atlas: HudAtlas::fonts(root)?,
+            panorama: Arc::new(horizon_client::gfx::panorama::Faces {
+                size: 1,
+                pixels: [0u8; 4].repeat(6),
+            }),
+        })
+    }
 }
 /// What a resource pack reload replaces (`Minecraft.reloadResourcePacks`):
 /// block models and sprites with their meshing tables, item models,
@@ -15010,6 +15021,7 @@ fn load_resources(
     settings: &Settings,
     started: Instant,
     menu: bool,
+    headless: bool,
     progress: &Progress,
     publish: &mut dyn FnMut(UiResources, &std::path::Path),
 ) -> Result<Loaded> {
@@ -15021,7 +15033,16 @@ fn load_resources(
     let mut loaded_gui = None;
     let mut ui_ready = false;
     let mut pack_error = None;
-    let ui = match UiResources::load(&root, vanilla_root) {
+    // A dedicated server builds only the font (UiResources::server), as the
+    // integrated server's game does: the full atlas and panorama are 144 MB.
+    let load_ui = |root: &std::path::Path| {
+        if headless {
+            UiResources::server(root)
+        } else {
+            UiResources::load(root, vanilla_root)
+        }
+    };
+    let ui = match load_ui(&root) {
         Ok(ui) => Some(ui),
         // Minecraft.rollbackResourcePacks: the packs' textures don't fit, start
         // with the game's own resources.
@@ -15073,7 +15094,7 @@ fn load_resources(
     let render = Arc::new(render);
     // The menu bundle must come from the same root as the world bundle.
     if !ui_ready || root != requested_root {
-        let ui = UiResources::load(&root, vanilla_root)?;
+        let ui = load_ui(&root)?;
         if menu {
             horizon_client::telemetry::mark_ui_ready();
             log::info!(
@@ -16143,6 +16164,7 @@ pub fn run() -> Result<()> {
         &early_settings,
         started,
         false,
+        options.dedicated.is_some(),
         &Progress::new(),
         &mut |_, _| {},
     )?;
