@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs, io,
     path::Path,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 /// Raw files a world's data packs add over the game's own data, by
@@ -158,7 +158,7 @@ impl Enchantment {
 
 /// Loot tables, items, enchantments and the tags they reference.
 pub struct LootData {
-    tables: Arc<HashMap<String, Value>>,
+    tables: Arc<LootTables>,
     modifiers: HashMap<String, Value>,
     predicates: HashMap<String, Value>,
     items: HashMap<String, ItemFacts>,
@@ -319,14 +319,62 @@ fn overlay_map(overlay: &PackOverlay, kind: &str, out: &mut HashMap<String, Valu
     }
 }
 
+/// Loot tables by id: the packs' tables, over the prepared data file's
+/// (#4267), each parsed on its first use. A root whose data file can't be
+/// mapped or written parses every table at load instead.
+#[derive(Default)]
+pub struct LootTables {
+    mapped: Option<(horizon_data_file::OwnedTable, Vec<OnceLock<Option<Value>>>)>,
+    parsed: HashMap<String, Value>,
+}
+impl LootTables {
+    fn load(root: &Path, overlay: &PackOverlay) -> io::Result<Self> {
+        use horizon_data_file::prepared;
+        // Missing or stale: rebuild it with horizon-prepare's writer, which
+        // parses every table, so a bad one still fails here.
+        let mapped = prepared::loot_tables(root).or_else(|_| {
+            prepared::write(root)?;
+            prepared::loot_tables(root)
+        });
+        let mut parsed = HashMap::new();
+        let mapped = match mapped {
+            Ok(file) => {
+                let values = (0..file.table().len()).map(|_| OnceLock::new()).collect();
+                Some((file, values))
+            }
+            Err(_) => {
+                load_kind(&root.join("data"), "loot_table", &mut parsed)?;
+                None
+            }
+        };
+        overlay_map(overlay, "loot_table", &mut parsed);
+        Ok(Self { mapped, parsed })
+    }
+    pub fn get(&self, id: &str) -> Option<&Value> {
+        if let Some(table) = self.parsed.get(id) {
+            return Some(table);
+        }
+        let (file, values) = self.mapped.as_ref()?;
+        let table = file.table();
+        let i = table.position(id.as_bytes())?;
+        values[i]
+            .get_or_init(|| serde_json::from_slice(table.value(i)?).ok())
+            .as_ref()
+    }
+    pub fn contains_key(&self, id: &str) -> bool {
+        self.parsed.contains_key(id)
+            || self
+                .mapped
+                .as_ref()
+                .is_some_and(|(file, _)| file.table().position(id.as_bytes()).is_some())
+    }
+}
+
 /// The loot tables of every namespace in `root`'s `data/`, with `overlay`'s
 /// over them. Shared while one is alive: `Items` and [`LootData`] of the
-/// same root and packs hold one map, not a copy each (7 MB).
-pub fn shared_tables(
-    root: &Path,
-    overlay: &PackOverlay,
-) -> io::Result<Arc<HashMap<String, Value>>> {
-    static LOADED: Mutex<Vec<(u64, Weak<HashMap<String, Value>>)>> = Mutex::new(Vec::new());
+/// same root and packs hold one, not a copy each.
+pub fn shared_tables(root: &Path, overlay: &PackOverlay) -> io::Result<Arc<LootTables>> {
+    static LOADED: Mutex<Vec<(u64, Weak<LootTables>)>> = Mutex::new(Vec::new());
     let key = {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let mut hasher = DefaultHasher::new();
@@ -345,28 +393,13 @@ pub fn shared_tables(
     {
         return Ok(tables);
     }
-    let mut tables = HashMap::new();
-    load_kind(&root.join("data"), "loot_table", &mut tables)?;
-    overlay_map(overlay, "loot_table", &mut tables);
-    let tables = Arc::new(tables);
+    let tables = Arc::new(LootTables::load(root, overlay)?);
     loaded.push((key, Arc::downgrade(&tables)));
     Ok(tables)
 }
 
 fn load_kind(data: &Path, kind: &str, out: &mut HashMap<String, Value>) -> io::Result<()> {
-    let Ok(entries) = fs::read_dir(data) else {
-        return Ok(());
-    };
-    let mut namespaces: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
-        .collect();
-    namespaces.sort();
-    for ns in namespaces {
-        load_dir(&data.join(&ns).join(kind), &ns, "", out)?;
-    }
-    Ok(())
+    parse_files(horizon_data_file::prepared::json_files(data, kind), out)
 }
 
 fn load_dir(
@@ -375,20 +408,17 @@ fn load_dir(
     prefix: &str,
     out: &mut HashMap<String, Value>,
 ) -> io::Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if path.is_dir() {
-            load_dir(&path, namespace, &format!("{prefix}{stem}/"), out)?;
-        } else if path.extension().is_some_and(|e| e == "json") {
-            let value = serde_json::from_slice(&fs::read(&path)?)?;
-            out.insert(format!("{namespace}:{prefix}{stem}"), value);
-        }
+    let mut files = Vec::new();
+    horizon_data_file::prepared::json_dir(dir, namespace, prefix, &mut files);
+    parse_files(files, out)
+}
+
+fn parse_files(
+    files: Vec<(String, std::path::PathBuf)>,
+    out: &mut HashMap<String, Value>,
+) -> io::Result<()> {
+    for (id, path) in files {
+        out.insert(id, serde_json::from_slice(&fs::read(&path)?)?);
     }
     Ok(())
 }
@@ -1643,6 +1673,95 @@ mod namespace_tests {
         let packs = shared_tables(&root, &PackOverlay { files: &files }).unwrap();
         assert!(!Arc::ptr_eq(&first, &packs));
         assert!(packs.contains_key("minecraft:chests/b"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn loot_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("horizon-loot-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("data/minecraft/loot_table/chests")).unwrap();
+        for (name, text) in [
+            ("a", r#"{"pools": [{"rolls": 1.0, "entries": []}]}"#),
+            ("b", r#"{"random_sequence": "minecraft:chests/b"}"#),
+        ] {
+            fs::write(
+                root.join(format!("data/minecraft/loot_table/chests/{name}.json")),
+                text,
+            )
+            .unwrap();
+        }
+        root
+    }
+
+    /// Every table read through the data file equals today's parse of its
+    /// file (`horizon-prepare --verify-data` checks the same on a real root).
+    fn assert_mapped_matches(root: &Path) {
+        let tables = LootTables::load(root, &PackOverlay::NONE).unwrap();
+        assert!(
+            tables.mapped.is_some(),
+            "no data file in {}",
+            root.display()
+        );
+        assert!(tables.parsed.is_empty());
+        let mut parsed = HashMap::new();
+        load_kind(&root.join("data"), "loot_table", &mut parsed).unwrap();
+        assert_eq!(
+            tables.mapped.as_ref().unwrap().0.table().len(),
+            parsed.len()
+        );
+        for (id, value) in &parsed {
+            assert!(tables.contains_key(id));
+            assert_eq!(tables.get(id), Some(value), "{id}");
+        }
+        assert!(!tables.contains_key("minecraft:chests/none"));
+    }
+
+    #[test]
+    fn mapped_tables_match_the_parsed_ones() {
+        let root = loot_root("mapped");
+        assert_mapped_matches(&root);
+        // A damaged file is rebuilt rather than read.
+        fs::write(root.join(horizon_data_file::FILE_NAME), b"HZDATA").unwrap();
+        assert_mapped_matches(&root);
+        let _ = fs::remove_dir_all(&root);
+        let prepared = std::env::var_os("HORIZON_RESOURCES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+            });
+        if prepared.join("data/minecraft/loot_table").is_dir() {
+            assert_mapped_matches(&prepared);
+        } else {
+            eprintln!("skipping the real tables: none at {}", prepared.display());
+        }
+    }
+
+    /// A data pack's or content mod's table replaces the data file's, and
+    /// adds new ones.
+    #[test]
+    fn pack_tables_win_over_the_data_file() {
+        let root = loot_root("packs");
+        let files = [
+            (
+                "loot_table/minecraft:chests/a".to_owned(),
+                vec![br#"{"pools": []}"#.to_vec()],
+            ),
+            (
+                "loot_table/minecraft:chests/c".to_owned(),
+                vec![br#"{"type": "minecraft:chest"}"#.to_vec()],
+            ),
+        ];
+        let tables = LootTables::load(&root, &PackOverlay { files: &files }).unwrap();
+        assert!(tables.mapped.is_some());
+        assert_eq!(
+            tables.get("minecraft:chests/a"),
+            Some(&serde_json::json!({"pools": []}))
+        );
+        assert_eq!(
+            tables.get("minecraft:chests/b").unwrap()["random_sequence"],
+            "minecraft:chests/b"
+        );
+        assert!(tables.contains_key("minecraft:chests/c"));
         let _ = fs::remove_dir_all(&root);
     }
 

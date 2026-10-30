@@ -7,8 +7,10 @@ rust-version = "1.85"
 description = "horizon-data.bin: prepared vanilla tables in one file that horizon-prepare writes from the player's own copy and the game maps (#4267)"
 
 [dependencies]
-# Already in Cargo.lock (winit's Wayland client).
+# All already in Cargo.lock: memmap2 for winit's Wayland client, the others for horizon-world.
 memmap2 = "0.9"
+serde_json = "1.0.151"
+sha2 = "0.10"
 
 [lints]
 workspace = true

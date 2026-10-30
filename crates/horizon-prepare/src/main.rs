@@ -16,6 +16,7 @@ const HELP: &str = "\
 horizon-prepare: prepare Horizon's resources from your own Minecraft Java Edition
 
 Usage: horizon-prepare [--prepare] [--server-jar PATH] [--minecraft-dir PATH] [--root PATH]
+       horizon-prepare --verify-data [--root PATH]
        horizon-prepare compile-exporters [--root PATH]
        horizon-prepare sounds [--minecraft-dir PATH] [--root PATH]
        horizon-prepare panorama [--minecraft-dir PATH] [--root PATH]
@@ -28,6 +29,7 @@ Usage: horizon-prepare [--prepare] [--server-jar PATH] [--minecraft-dir PATH] [-
                         (default: HORIZON_SERVER_JAR, or the copy imported before)
   --minecraft-dir PATH  The official launcher's game directory with your installed copy
                         (default: HORIZON_MINECRAFT_DIR, or the launcher's own)
+  --verify-data         Check that horizon-data.bin matches the prepared files it was built from
   --root PATH           The Horizon folder to prepare (default: the folder this program is
                         in, else the nearest folder above the current one with research-lock.json)
 
@@ -71,6 +73,7 @@ fn main() -> ExitCode {
         java_home: None,
     };
     let mut root = None;
+    let mut verify_data = false;
     let mut args = std::env::args_os().skip(1).peekable();
     let assets = args.next_if(|a| {
         matches!(
@@ -101,6 +104,10 @@ fn main() -> ExitCode {
             }
             "--prepare" if inline.is_none() => {
                 options.import = true;
+                Ok(())
+            }
+            "--verify-data" if assets.is_none() && inline.is_none() => {
+                verify_data = true;
                 Ok(())
             }
             "--server-jar" => value("--server-jar").map(|v| options.server_jar = Some(v)),
@@ -151,6 +158,7 @@ fn main() -> ExitCode {
         Some("languages") => {
             horizon_prepare::languages(&options.root, options.minecraft_dir.as_deref(), &log)
         }
+        _ if verify_data => horizon_prepare::verify_data(&options.root, &log),
         _ => horizon_prepare::prepare(&options, &log),
     };
     match result {

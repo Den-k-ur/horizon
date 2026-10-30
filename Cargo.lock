@@ -1227,6 +1227,8 @@ name = "horizon-data-file"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1308,6 +1310,7 @@ name = "horizon-prepare"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "horizon-data-file",
  "libc",
  "regex",
  "sha1",
@@ -1428,6 +1431,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "horizon-core",
+ "horizon-data-file",
  "libm",
  "lz4_flex",
  "postcard",

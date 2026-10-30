@@ -30,6 +30,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+pub mod prepared;
+
 pub const FILE_NAME: &str = "horizon-data.bin";
 const MAGIC: [u8; 8] = *b"HZDATA\0\0";
 const FORMAT: u32 = 1;

@@ -504,9 +504,35 @@ fn prepare_impl(options: &Options, log: Log, compile_only: bool) -> Result<PathB
         return Ok(run.bundle()?.to_path_buf());
     }
     steps(&run, &lock, &oracle, options.minecraft_dir.as_deref())?;
+    let tables = horizon_data_file::prepared::write(&resources)
+        .map_err(|e| format!("{}: {e}", horizon_data_file::FILE_NAME))?;
+    log(&format!(
+        "Wrote {} ({tables} loot tables)",
+        horizon_data_file::FILE_NAME
+    ));
     log(&format!(
         "Prepared Horizon native-client resources: {}",
         resources.display()
+    ));
+    Ok(resources)
+}
+
+/// `--verify-data`: decode every table of the prepared folder's data file and
+/// compare it with the file it was built from.
+pub fn verify_data(root: &Path, log: Log) -> Result<PathBuf, String> {
+    let lock = artifacts::Lock::read(root)?;
+    let resources = root
+        .join(".local")
+        .join("horizon-client")
+        .join(&lock.version);
+    let verified = horizon_data_file::prepared::verify(&resources)
+        .map_err(|e| format!("{}: {e}", horizon_data_file::FILE_NAME))?;
+    let (took, id) = &verified.slowest;
+    log(&format!(
+        "{}: {} loot tables match their files; slowest parse {id} ({} µs)",
+        horizon_data_file::FILE_NAME,
+        verified.tables,
+        took.as_micros()
     ));
     Ok(resources)
 }
