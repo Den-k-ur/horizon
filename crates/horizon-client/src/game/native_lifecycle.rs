@@ -158,6 +158,7 @@ impl Game<'_> {
 
     pub(super) fn native_lifecycle_world_ready(&mut self) {
         if let Some(context) = self.native_lifecycle.world_open_ready() {
+            self.prepare_owned_npcs();
             self.native_world_lifecycle(&context, WorldPhase::WorldOpenReady, "");
         }
     }

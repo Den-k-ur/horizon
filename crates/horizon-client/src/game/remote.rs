@@ -567,6 +567,7 @@ impl Game<'_> {
         if reason.is_none() && self.integrated.as_ref().is_some_and(|s| !s.stopped()) {
             return self.begin_closing_save(false);
         }
+        self.clear_owned_npc_mirrors();
         self.finish_perf();
         if reason.is_none() {
             // Leaving on purpose: nothing for auto-reconnect to retry.
@@ -1202,6 +1203,7 @@ impl Game<'_> {
     }
     /// Switch to a (possibly new) dimension: a fresh client level.
     fn enter_remote_dimension(&mut self, spawn: &play::SpawnInfo, keep_world: bool) {
+        self.clear_owned_npc_mirrors();
         let Some(r) = self.remote.as_mut() else {
             return;
         };
@@ -1979,6 +1981,9 @@ impl Game<'_> {
 
     fn handle_packet(&mut self, packet: C) -> Result<()> {
         match packet {
+            C::CustomPayload(payload) => {
+                self.handle_owned_npc_payload(&payload);
+            }
             // ClientCommonPacketListenerImpl.handlePing runs on the game
             // thread, after all preceding packets (especially teleports).
             C::Ping(p) => self.send(S::Pong(p)),

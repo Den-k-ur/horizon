@@ -42,6 +42,12 @@ mod shows one.
 API 3 adds authoritative world lifecycle events through `native_world_lifecycle`: open ready, open failed,
 and final close. Bundles that use these events need `"hooks": 3`.
 
+This Civilization fork adds **API 4** helpers for independent, server-owned NPCs:
+creation, task state, movement/work orders, cancellation, profession/appearance
+and despawn. See [Owned NPC API](api/owned-npcs.md) for the supported native helpers,
+integrated-client replication, persistence, checks and present limitations.
+This extension is not available in unmodified upstream builds.
+
 ## What the launcher does
 
 In the window: install a native mod from the Mods page. The first one shows a notice once (the first build downloads

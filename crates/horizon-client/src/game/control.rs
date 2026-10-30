@@ -12,6 +12,8 @@ use winit::{event::MouseButton, event_loop::ActiveEventLoop, keyboard::KeyCode};
 const HELP: &[&str] = &[
     "status                         game, player, streaming and renderer state",
     "simulation                     authoritative projectiles in the owner's level",
+    "owned-npcs JSON                trusted local testing of the server-owned NPC API",
+    "owned-npc-mirrors              number of independently rendered NPC mirrors",
     "server-hold on|off             hold simulation and player packets at a control-fixture barrier",
     "stall MILLISECONDS             stall the window thread (0..5000), leaving transport alive",
     "key KEY down|up|tap|repeat     press, release or auto-repeat a key (w a s d space shift ctrl e q esc f3 1-9 arrows ...)",
@@ -263,6 +265,29 @@ impl Game<'_> {
                     json!({ "game_time": self.world.game_time, "projectiles": self.projectiles_status() })
                 };
                 Ok(Some(value))
+            }
+            "owned-npc-mirrors" => Ok(Some(
+                json!({"count":self.owned_npc_mirrors.len(),"last_snapshot":self.owned_npc_snapshot_tick}),
+            )),
+            "owned-npcs" => {
+                self.require_world()?;
+                let input = line
+                    .trim_start()
+                    .strip_prefix("owned-npcs")
+                    .unwrap_or("")
+                    .trim();
+                if input.len() > 64 * 1024 {
+                    return Err("Owned NPC request exceeds 64 KiB".into());
+                }
+                let request = serde_json::from_str::<super::owned_npcs::Request>(input)?;
+                if let Some(server) = &self.integrated {
+                    let value = server
+                        .call(move |g| g.in_owner_level(|g| g.owned_npc_control(request)))
+                        .ok_or("The integrated server stopped")?;
+                    Ok(Some(value))
+                } else {
+                    Ok(Some(self.owned_npc_control(request)))
+                }
             }
             "server-hold" => {
                 self.require_world()?;

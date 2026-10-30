@@ -168,6 +168,8 @@ mod net_harness;
 mod nether_portal;
 mod ominous_item_spawner;
 mod options;
+mod owned_npc_net;
+mod owned_npcs;
 mod packs;
 mod pad;
 mod pad_menu;
@@ -1973,6 +1975,9 @@ struct Game<'a> {
     recipe_tables: native_recipes::RecipeTables,
     /// The item panel beside container screens (`game/native_panel.rs`).
     panel: native_panel::Panel,
+    owned_npcs: owned_npcs::OwnedNpcs,
+    owned_npc_mirrors: Vec<owned_npc_net::MirrorNpc>,
+    owned_npc_snapshot_tick: Option<(String, u64)>,
     /// Horizon's own shader pack, while one is picked (`game/native_shaders.rs`).
     native_shaders: native_shaders::NativeShaders,
     /// The native lifecycle bookkeeping.
@@ -5512,6 +5517,7 @@ impl Game<'_> {
         self.update_totem_ready();
         self.tick_command_extras();
         self.native_tick();
+        self.tick_owned_npcs();
         self.tell_native_now();
         let camera_eye = self.camera_eye_height();
         let stick = self.pad_move();
@@ -8499,6 +8505,7 @@ impl Game<'_> {
         self.ominous_item_spawner_geometry(camera, alpha, &mut out);
         // Mobs and their projectiles (a span each).
         self.mob_geometry(camera, alpha, &mut out);
+        self.owned_npc_mirror_geometry(camera, alpha, &mut out);
         // In first person only a shader pack's shadow pass draws the player.
         self.mark_player(out.len(), !self.own_body_in_view());
         self.player_model_geometry(camera, self.clock.camera_fraction(), &mut out);
@@ -12121,6 +12128,9 @@ impl Game<'_> {
         self.save_game_metadata()
     }
     fn save_game_metadata(&mut self) -> Result<()> {
+        if let Err(error) = self.save_owned_npcs() {
+            log::warn!("Owned NPC save: {error}; continuing the vanilla world save");
+        }
         self.save_maps();
         self.save_random_sequences();
         self.save_fight();
@@ -14764,6 +14774,9 @@ impl<'a> Game<'a> {
             mods: Default::default(),
             recipe_tables: Default::default(),
             panel: Default::default(),
+            owned_npcs: Default::default(),
+            owned_npc_mirrors: Vec::new(),
+            owned_npc_snapshot_tick: None,
             native_shaders: Default::default(),
             native_lifecycle: Default::default(),
             sky_darken_memo: Default::default(),

@@ -6,6 +6,7 @@
 //! Horizon's own HUD extras do, and keep a mod's settings where the
 //! WebAssembly mod of the same id kept them.
 //!
+//! API 4 adds authoritative owned NPC helpers (identity, orders and appearance).
 //! API 3 adds the world lifecycle hook (`native_world_lifecycle`).
 //!
 //! API 2 adds the item panel beside container screens and its recipe pages
@@ -38,7 +39,7 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 /// The hook points' API version. The launcher reads this line from the
 /// source it builds; keep its form.
 #[allow(dead_code)]
-pub(crate) const NATIVE_HOOKS_API: u32 = 3;
+pub(crate) const NATIVE_HOOKS_API: u32 = 4;
 
 /// The zoom a native mod asks for (`native_zoom`): the factor (1 is none),
 /// eased through the field of view like the spyglass when `smooth`, and the
@@ -345,6 +346,51 @@ impl Game<'_> {
     /// launcher's next build leaves it out.
     pub(super) fn native_on(&self, mod_id: &str) -> bool {
         !self.settings.mods.disabled.contains(mod_id)
+    }
+    /// API 4: call from a server hook. The owner is the calling native mod's id.
+    pub(super) fn native_npc_ensure(
+        &mut self,
+        owner: &str,
+        request: horizon_mods::owned_npcs::EnsureNpc,
+    ) -> Result<horizon_mods::owned_npcs::Npc, String> {
+        self.ensure_owned_npc(owner, request)
+    }
+    pub(super) fn native_npc_state(
+        &mut self,
+        owner: &str,
+        key: &str,
+    ) -> Result<horizon_mods::owned_npcs::Npc, String> {
+        self.owned_npc_state(owner, key)
+    }
+    pub(super) fn native_npc_set_order(
+        &mut self,
+        owner: &str,
+        key: &str,
+        order: horizon_mods::owned_npcs::Order,
+    ) -> Result<u64, String> {
+        self.order_owned_npc(owner, key, order)
+    }
+    pub(super) fn native_npc_cancel(&mut self, owner: &str, key: &str) -> Result<u64, String> {
+        self.cancel_owned_npc(owner, key)
+    }
+    pub(super) fn native_npc_set_profession(
+        &mut self,
+        owner: &str,
+        key: &str,
+        profession: &str,
+    ) -> Result<u64, String> {
+        self.profession_owned_npc(owner, key, profession)
+    }
+    pub(super) fn native_npc_set_appearance(
+        &mut self,
+        owner: &str,
+        key: &str,
+        appearance: horizon_mods::owned_npcs::Appearance,
+    ) -> Result<(), String> {
+        self.appearance_owned_npc(owner, key, appearance)
+    }
+    pub(super) fn native_npc_despawn(&mut self, owner: &str, key: &str) -> Result<(), String> {
+        self.despawn_owned_npc(owner, key)
     }
     /// Playing, with nothing over the world: keys and zoom apply.
     pub(super) fn native_playing(&self) -> bool {

@@ -1,14 +1,31 @@
 # Owned NPC API — foundation for Civilization-style mods
 
-Status: experimental Rust API foundation. This patch does **not** spawn or render
-entities, move an actor, add a network entity type, or expose a new native hook.
-It supplies the persistent registry and command semantics that an authoritative
-native backend will use. No vanilla villager AI, POIs or teleport commands are
-part of this API.
+Status: experimental, implemented in this fork. Native hooks API **4** exposes
+authoritative NPC helpers. The server creates independent actors, runs A*
+navigation and collision physics, and persists them in the world index. The
+integrated client renders separate, interpolated mirrors from bounded snapshots.
+No vanilla villager AI, POIs or NPC teleport commands are part of this API.
 
 The implementation is `horizon_mods::owned_npcs`. New code mods in this checkout
 use the native mechanism described in [native-mods](../native-mods.md); adding an
 interface to the old WebAssembly WIT would not make it available in this build.
+
+`game/owned_npcs.rs` is the authoritative backend, `owned_npc_actor.rs` owns each
+independent body/controller, and `game/owned_npc_net.rs` replicates render-only
+mirrors through `horizon:owned_npcs`. Neither body nor mirror enters `Game::mobs`.
+The native helpers reject calls from the window or an external server mirror;
+use them from the integrated server's native tick/lifecycle hook. Native helpers
+take the calling mod ID as `owner`, as the existing settings helpers do.
+
+### Native helper names (fork-only API 4)
+
+`native_npc_ensure`, `native_npc_state`, `native_npc_set_order`,
+`native_npc_cancel`, `native_npc_set_profession`, `native_npc_set_appearance`,
+and `native_npc_despawn` forward to the registry operations below. Creation is
+asynchronous: `pending-spawn` becomes `loaded` on a running server tick. An
+unloaded chunk retains its identity and last observed position; it does not
+create another entity. The backend recreates that same runtime body when the
+chunk loads. `work_seconds` persists elapsed work across chunk/world reloads.
 
 ## Operations
 
@@ -51,21 +68,64 @@ mod's scheduler, not to vanilla farming or an automatic registry timer.
 - Movement arrival radii and work durations are finite and bounded. Invalid
   operations do not partially alter an actor's position or current order.
 
-## Next integration patches
+## Present limitations
 
-1. Add an authoritative native NPC backend with a distinct gameplay type,
-   controller and persistent world index; reuse low-level navigation and physics.
-2. Connect creation, movement observation, cancellation and tombstones to chunk
-   lifecycle. Keep unloaded identities out of a second spawn path.
-3. Register matching definition/entity IDs on the integrated server and client,
-   and add rendering plus explicitly validated referenced skin assets.
-4. Expose native-mod helper methods/hooks around these operations and version the
-   native contract. The host binds the registered owner automatically.
-5. Exercise ensure → move → arrive/work → cancel/reassign → unload/reload in a
-   real client. The unit tests below do not constitute that gameplay proof.
+- Visible replication is currently accepted only from the client's own integrated
+  host. External LAN/dedicated-server clients need a capability handshake before
+  enabling this channel; they are not supported by this first version.
+- Supported geometry resources are `minecraft:entity/player` and
+  `minecraft:entity/villager`, reused only as prepared models. The body has its
+  own `owned_npc:<definition>` identity and no vanilla gameplay controller.
+- Textures must already exist in the prepared Minecraft atlas. PNG import and
+  namespaced skin loading are not implemented. Invalid/unknown appearance
+  snapshots are rejected atomically on the client, retaining its last good view.
+- Profession is data; `Work` is a timed action, not automatic tree chopping,
+  block construction, harvest, or city income. The Civilization mod must drive
+  its production/yield changes from the reported task state.
+- Independent bodies are not yet vanilla combat/trading/pickup entities. There
+  are no custom world interaction events, custom animation definitions or GUI.
+- API 4 is specific to this fork; unmodified upstream builds do not provide it.
+
+## Real-client development harness
+
+Build this fork (do not replace the official installation):
+
+```sh
+cargo build --locked --profile fast -p horizon-client --bin horizon-client --bin horizon-ctl
+```
+
+`horizon-ctl owned-npcs JSON` is a trusted local development endpoint that calls
+the same native helpers on the integrated server. An envelope looks like:
+
+```json
+{"owner":"civilization","command":{"operation":"set-order","key":"citizen_1","order":{"kind":"move-to","target":{"x":10.5,"y":100.0,"z":0.5},"arrival_radius":0.6}}}
+```
+
+Other operations are `ensure` (field `npc`: `EnsureNpc`), `state`, `list`,
+`cancel`, `set-profession`, `set-appearance`, and `despawn`.
+`horizon-ctl owned-npc-mirrors` reports the actual client mirror count. The
+control transport is local and token-protected; it is not an NPC network RPC.
+The authoritative save is `<world>/horizon-owned-npcs.json`, written atomically.
+
+```sh
+python tools/test_owned_npcs_native.py --game target/fast/horizon-client.exe --ctl target/fast/horizon-ctl.exe --resources PATH_TO_PREPARED_26.3 --proof-dir PATH_TO_NEW_PROOFS --leave-running
+```
+
+The harness creates a fresh home and uses normal integrated-server single
+player. It records `report.json`, the CLI transcript and `owned-npc.png`.
+It never uses the deprecated `--in-frame` simulation or the player's saves.
+On Windows subprocess output is captured to regular files so a launched game's
+inherited pipe handles cannot stall the test until the game exits.
 
 ## Current validation
 
 Run `cargo test -p horizon-mods --lib owned_npcs` for tests of persistence across
 unload/reload, ownership isolation, stale arrival rejection, bounds/quotas,
 tombstones and corrupted/duplicate saves. No Minecraft resources are required.
+
+Real-client checks passed on Windows/Vulkan on 2026-10-30: server creation visible
+on the separate client; native walking around a solid wall; timed work; return
+to the store; cancel/reassign; save/restart without a duplicate; and despawn
+removing the client mirror. Geometry in this run was the prepared villager model
+with the independent controller. These results do not imply that the complete
+Civilization gameplay mod has been ported to the current native-mod mechanism.
