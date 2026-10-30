@@ -1223,6 +1223,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-data-file"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+]
+
+[[package]]
 name = "horizon-dualsense"
 version = "0.1.0"
 dependencies = [
