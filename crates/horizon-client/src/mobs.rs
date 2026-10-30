@@ -52,6 +52,7 @@ pub mod monster_brain;
 pub mod nautilus;
 pub mod nav;
 pub mod nether;
+pub mod owned_npc_motion;
 pub mod panda;
 pub mod parrot;
 pub mod path;

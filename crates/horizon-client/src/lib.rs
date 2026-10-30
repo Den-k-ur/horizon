@@ -5,6 +5,7 @@ pub mod advancements;
 pub mod ambience;
 pub mod animate_tick;
 pub mod arrows;
+pub mod owned_npc_actor;
 pub use horizon_client_render::{
     assets, atlas_sources, audio, auth, bidi, biome, block_entities, block_entity_anim,
     block_entity_render, border_render, breaking, brewing, camera, chat, chunk, chunk_map, clouds,

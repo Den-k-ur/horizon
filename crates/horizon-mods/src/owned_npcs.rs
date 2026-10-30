@@ -117,6 +117,8 @@ pub struct Npc {
     pub order: Order,
     pub order_revision: u64,
     pub order_status: OrderStatus,
+    #[serde(default)]
+    pub work_seconds: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -200,6 +202,7 @@ impl Registry {
             order: Order::Idle,
             order_revision: 0,
             order_status: OrderStatus::Complete,
+            work_seconds: 0.0,
         });
         Ok(self.records.last().expect("just inserted"))
     }
@@ -231,6 +234,7 @@ impl Registry {
         npc.order_revision = revision;
         npc.order = order;
         npc.order_status = OrderStatus::Pending;
+        npc.work_seconds = 0.0;
         Ok(revision)
     }
 
@@ -308,6 +312,50 @@ impl Registry {
         Ok(())
     }
 
+    /// All persistent world identities, including unloaded actors and tombstones.
+    pub fn records(&self) -> impl Iterator<Item = &Npc> {
+        self.records.iter()
+    }
+
+    /// Trusted native navigation/physics observation with a persistent work timer.
+    pub fn update_runtime(
+        &mut self,
+        owner: &str,
+        key: &str,
+        revision: u64,
+        position: Position,
+        status: OrderStatus,
+        work_seconds: f64,
+    ) -> Result<(), String> {
+        position.validate()?;
+        if !work_seconds.is_finite() || !(0.0..=3600.1).contains(&work_seconds) {
+            return Err("Invalid native work progress".into());
+        }
+        let npc = self.state_mut(owner, key)?;
+        if npc.order_revision != revision || npc.presence == Presence::Despawned {
+            return Err("Stale NPC observation".into());
+        }
+        if status == OrderStatus::Complete && npc.order_status != OrderStatus::Complete {
+            match npc.order {
+                Order::MoveTo {
+                    target,
+                    arrival_radius,
+                } if position.distance_squared(target) > arrival_radius.powi(2) => {
+                    return Err("NPC has not reached its target".into());
+                }
+                Order::Work { seconds, .. } if work_seconds + 0.000001 < seconds => {
+                    return Err("NPC work is not complete".into());
+                }
+                _ => {}
+            }
+        }
+        npc.position = position;
+        npc.presence = Presence::Loaded;
+        npc.order_status = status;
+        npc.work_seconds = work_seconds;
+        Ok(())
+    }
+
     /// Keep a tombstone so an unloaded old actor is removed when its chunk loads.
     pub fn despawn(&mut self, owner: &str, key: &str) -> Result<(), String> {
         self.cancel(owner, key)?;
@@ -342,6 +390,9 @@ impl Registry {
             }
             .validate()?;
             npc.order.validate()?;
+            if !npc.work_seconds.is_finite() || !(0.0..=3600.1).contains(&npc.work_seconds) {
+                return Err("Invalid saved work progress".into());
+            }
             if !keys.insert((&npc.owner, &npc.stable_key)) {
                 return Err("Duplicate NPC identity in index".into());
             }
@@ -510,5 +561,55 @@ mod tests {
         assert_eq!(npc.position, original.position);
         assert_eq!(npc.appearance, original.appearance);
         assert_eq!(npc.stable_key, original.stable_key);
+    }
+
+    #[test]
+    fn native_work_progress_survives_save_and_cannot_finish_early() {
+        let mut index = Registry::default();
+        index.ensure("one", request()).unwrap();
+        let revision = index
+            .set_order(
+                "one",
+                "citizen_1",
+                Order::Work {
+                    action: "gather_wood".into(),
+                    seconds: 5.0,
+                },
+            )
+            .unwrap();
+        index
+            .update_runtime(
+                "one",
+                "citizen_1",
+                revision,
+                point(0.0),
+                OrderStatus::Running,
+                4.95,
+            )
+            .unwrap();
+        let mut index = Registry::restore(&index.save().unwrap()).unwrap();
+        assert_eq!(index.state("one", "citizen_1").unwrap().work_seconds, 4.95);
+        assert!(
+            index
+                .update_runtime(
+                    "one",
+                    "citizen_1",
+                    revision,
+                    point(0.0),
+                    OrderStatus::Complete,
+                    4.95
+                )
+                .is_err()
+        );
+        index
+            .update_runtime(
+                "one",
+                "citizen_1",
+                revision,
+                point(0.0),
+                OrderStatus::Complete,
+                5.0,
+            )
+            .unwrap();
     }
 }
