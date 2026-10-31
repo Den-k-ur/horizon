@@ -70,9 +70,10 @@ mod's scheduler, not to vanilla farming or an automatic registry timer.
 
 ## Present limitations
 
-- Visible replication is currently accepted only from the client's own integrated
-  host. External LAN/dedicated-server clients need a capability handshake before
-  enabling this channel; they are not supported by this first version.
+- Integrated and external fork LAN clients negotiate the exact protocol version
+  `[1]` on `horizon:owned_npc_capabilities`. Only negotiated, loaded clients receive
+  snapshots; snapshots grant rendering, never mutation authority. Two real clients
+  were tested on 2026-10-31. Dedicated-server deployment remains untested.
 - Supported geometry resources are `minecraft:entity/player` and
   `minecraft:entity/villager`, reused only as prepared models. The body has its
   own `owned_npc:<definition>` identity and no vanilla gameplay controller.
@@ -129,3 +130,5 @@ to the store; cancel/reassign; save/restart without a duplicate; and despawn
 removing the client mirror. Geometry in this run was the prepared villager model
 with the independent controller. These results do not imply that the complete
 Civilization gameplay mod has been ported to the current native-mod mechanism.
+
+Validation on 2026-10-31: the updated fork passed nine live NPC/save checks, including real A* movement, cancellation, despawn, owner inventory restoration with the campaign disabled, and an intentionally empty inventory staying empty. Civilization passed eight scenarios; two real clients passed six cooperation checks. See [build report](../civilization/BUILD-REPORT.ru.md).
