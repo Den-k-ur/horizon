@@ -284,7 +284,7 @@ impl Actor {
                         ],
                         0,
                     );
-                    self.path_failed = !self.body.nav_move_to_path(path, 0.65);
+                    self.path_failed = !self.body.nav_move_to_path(world, path, 0.65);
                     self.repath = REPATH_TICKS;
                 }
                 self.repath = self.repath.saturating_sub(1);

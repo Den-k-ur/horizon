@@ -1,6 +1,6 @@
 # Owned NPC API — foundation for Civilization-style mods
 
-Status: experimental, implemented in this fork. Native hooks API **4** exposes
+Status: experimental, implemented in this fork. Owned NPC extension **1**, alongside native hooks API **40**, exposes
 authoritative NPC helpers. The server creates independent actors, runs A*
 navigation and collision physics, and persists them in the world index. The
 integrated client renders separate, interpolated mirrors from bounded snapshots.
@@ -17,7 +17,7 @@ The native helpers reject calls from the window or an external server mirror;
 use them from the integrated server's native tick/lifecycle hook. Native helpers
 take the calling mod ID as `owner`, as the existing settings helpers do.
 
-### Native helper names (fork-only API 4)
+### Native helper names (fork-only extension 1)
 
 `native_npc_ensure`, `native_npc_state`, `native_npc_set_order`,
 `native_npc_cancel`, `native_npc_set_profession`, `native_npc_set_appearance`,
@@ -84,7 +84,7 @@ mod's scheduler, not to vanilla farming or an automatic registry timer.
   its production/yield changes from the reported task state.
 - Independent bodies are not yet vanilla combat/trading/pickup entities. There
   are no custom world interaction events, custom animation definitions or GUI.
-- API 4 is specific to this fork; unmodified upstream builds do not provide it.
+- Owned NPC extension 1 is specific to this fork; it is independent of upstream native hooks API 40.
 
 ## Real-client development harness
 

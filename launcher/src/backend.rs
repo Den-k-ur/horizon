@@ -46,31 +46,78 @@ pub struct Release {
     pub nightly: Option<String>,
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub const ASSET: Option<&str> = Some("horizon-linux-x86_64.tar.gz");
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub const ASSET: Option<&str> = Some("horizon-macos-arm64.zip");
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const ASSET: Option<&str> = Some("horizon-windows-x64.zip");
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-)))]
-pub const ASSET: Option<&str> = None;
+/// The release assets of each system Horizon ships for: (`std::env::consts::OS`, `ARCH`, the game,
+/// the launcher). game-build.yml builds the game's, nightly-build.yml signs and publishes them, and
+/// launcher.yml builds the launcher's (`platform_assets_are_published`).
+pub const PLATFORMS: [(&str, &str, &str, &str); 4] = [
+    (
+        "linux",
+        "x86_64",
+        "horizon-linux-x86_64.tar.gz",
+        "horizon-launcher-linux-x86_64.tar.gz",
+    ),
+    (
+        "macos",
+        "aarch64",
+        "horizon-macos-arm64.zip",
+        "horizon-launcher-macos-arm64.zip",
+    ),
+    // Intel Macs (#1161).
+    (
+        "macos",
+        "x86_64",
+        "horizon-macos-x64.zip",
+        "horizon-launcher-macos-x64.zip",
+    ),
+    (
+        "windows",
+        "x86_64",
+        "horizon-windows-x64.zip",
+        "horizon-launcher-windows-x64.zip",
+    ),
+];
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub const LAUNCHER_ASSET: Option<&str> = Some("horizon-launcher-linux-x86_64.tar.gz");
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub const LAUNCHER_ASSET: Option<&str> = Some("horizon-launcher-macos-arm64.zip");
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const LAUNCHER_ASSET: Option<&str> = Some("horizon-launcher-windows-x64.zip");
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-)))]
-pub const LAUNCHER_ASSET: Option<&str> = None;
+/// `a == b`, in a const context.
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// This system's entry of `PLATFORMS`: the game's asset and the launcher's.
+const fn platform_assets(os: &str, arch: &str) -> Option<(&'static str, &'static str)> {
+    let mut i = 0;
+    while i < PLATFORMS.len() {
+        let (o, a, game, launcher) = PLATFORMS[i];
+        if same(o, os) && same(a, arch) {
+            return Some((game, launcher));
+        }
+        i += 1;
+    }
+    None
+}
+
+const OWN_ASSETS: Option<(&str, &str)> =
+    platform_assets(std::env::consts::OS, std::env::consts::ARCH);
+/// The game build this launcher installs, None where Horizon has none.
+pub const ASSET: Option<&str> = match OWN_ASSETS {
+    Some((game, _)) => Some(game),
+    None => None,
+};
+/// The launcher build this launcher updates itself from.
+pub const LAUNCHER_ASSET: Option<&str> = match OWN_ASSETS {
+    Some((_, launcher)) => Some(launcher),
+    None => None,
+};
 
 const LAUNCHER_BINARY: &str = if cfg!(windows) {
     "horizon-launcher.exe"
@@ -666,6 +713,9 @@ pub(crate) fn install_as(
 
 pub fn remove(tag: &str) -> Result<(), String> {
     let dir = version_dir(tag);
+    // The marker goes first: a version counted as installed until its folder is gone comes back
+    // into `installed` when an overlapping removal re-reads the list mid-delete.
+    let _ = fs::remove_file(dir.join(COMPLETE));
     // Windows holds a file for a moment after the game, a scan or the launcher's own reader lets
     // go of it, and remove_dir_all stops at the first one. Retry for a second; a folder that is
     // already gone is removed.
@@ -1598,6 +1648,41 @@ pub enum MinecraftFrom {
     Mojang,
 }
 
+/// A preparation's steps, in the order they run, as Home names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PrepareStep {
+    /// Minecraft's files: found in an install, or downloaded from Mojang.
+    Files,
+    Java,
+    Sounds,
+    /// horizon-prepare's own work on those files.
+    Prepare,
+}
+
+impl PrepareStep {
+    pub const ALL: [PrepareStep; 4] = [Self::Files, Self::Java, Self::Sounds, Self::Prepare];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Files => "Game files",
+            Self::Java => "Java",
+            Self::Sounds => "Sounds",
+            Self::Prepare => "Prepare",
+        }
+    }
+}
+
+/// The step the preparation under way is at (`PrepareStep::ALL`'s index).
+static PREPARE_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn prepare_step() -> PrepareStep {
+    PrepareStep::ALL[PREPARE_STEP.load(std::sync::atomic::Ordering::Relaxed)]
+}
+
+pub fn set_prepare_step(step: PrepareStep) {
+    PREPARE_STEP.store(step as usize, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Checks what the preparation needs and picks how to run it. PLAY.txt describes the same
 /// steps: the player's own launcher install, the server jar from that version's own json, and
 /// Java (and Python, for versions before horizon-prepare). Also returns the Minecraft folder
@@ -1609,6 +1694,7 @@ pub fn preparer(
     from: MinecraftFrom,
     log: &dyn Fn(String),
 ) -> Result<(Preparer, PathBuf), String> {
+    set_prepare_step(PrepareStep::Files);
     let version = game_version(tag);
     let dir = version_dir(tag);
     let reused = horizon_prepare::artifacts::reuse_imported(&dir, &|line| log(line.to_string()))?;
@@ -1680,6 +1766,7 @@ pub fn preparer(
             .into_iter()
             .map(|(_, dir)| dir),
     );
+    set_prepare_step(PrepareStep::Java);
     let java_home = java(
         major,
         !horizon_prepare::exporters::available(&dir),
@@ -1757,6 +1844,7 @@ pub fn sounds(tag: &str, minecraft: &Path, log: &dyn Fn(String)) {
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("horizon-prepare sounds"))
     });
+    set_prepare_step(PrepareStep::Sounds);
     log("Copying the sounds from your Minecraft install".into());
     let result = match binary {
         Some(binary) => crate::process::command(binary)
@@ -3328,6 +3416,57 @@ pub fn {f}("
             resources_summary(false, false, "26.3"),
             resources_summary(false, true, "26.3")
         );
+    }
+
+    #[test]
+    fn each_mac_picks_the_build_for_its_processor() {
+        assert_eq!(
+            platform_assets("macos", "aarch64"),
+            Some((
+                "horizon-macos-arm64.zip",
+                "horizon-launcher-macos-arm64.zip"
+            ))
+        );
+        assert_eq!(
+            platform_assets("macos", "x86_64"),
+            Some(("horizon-macos-x64.zip", "horizon-launcher-macos-x64.zip"))
+        );
+        assert_eq!(
+            platform_assets("windows", "x86_64").map(|(game, _)| game),
+            Some("horizon-windows-x64.zip")
+        );
+        assert_eq!(platform_assets("linux", "aarch64"), None);
+        assert_eq!(platform_assets("macos", "x86"), None);
+        assert_eq!(
+            ASSET,
+            platform_assets(std::env::consts::OS, std::env::consts::ARCH).map(|(game, _)| game)
+        );
+    }
+
+    /// Every asset a launcher looks for is one the release workflows build, sign and publish.
+    #[test]
+    fn platform_assets_are_published() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |path: &str| fs::read_to_string(repo.join(path)).unwrap();
+        let build = read(".github/workflows/game-build.yml");
+        let nightly = read(".github/workflows/nightly-build.yml");
+        let launcher = read(".github/workflows/launcher.yml");
+        for (os, arch, game, launcher_asset) in PLATFORMS {
+            assert!(
+                build.contains(&format!("asset: {game}")),
+                "game-build.yml builds no {game}"
+            );
+            // Signed (SHA256SUMS), then published.
+            assert_eq!(
+                nightly.matches(&format!("dist/{game}")).count(),
+                2,
+                "nightly-build.yml must sign and publish {game} ({os} {arch})"
+            );
+            assert!(
+                launcher.contains(&format!("asset: {launcher_asset}")),
+                "launcher.yml builds no {launcher_asset}"
+            );
+        }
     }
 
     #[test]

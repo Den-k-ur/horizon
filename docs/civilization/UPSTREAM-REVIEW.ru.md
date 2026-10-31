@@ -1,0 +1,86 @@
+# Сравнение форка с upstream Horizon
+
+Исходники первого среза Civilization синхронизированы с upstream Horizon на коммите `3c68c05d0acabd638dc15158a1d68e121577ec81` в отдельной ветке `codex/civilization-upstream-sync`. Сохранены **Native Hooks API 40**, новый upstream-каталог hooks и собственное расширение **Owned NPC API 1**. Проверка компиляции объединённых исходников прошла; после неё добавлена интеграция `/civ` в новый серверный command dispatch, поэтому окончательные проверки, сборка приложения и живые игровые сценарии ещё требуются. Merge-коммит на момент этого обзора не создан. Оригинальный репозиторий не изменён.
+
+## Точные версии и объём
+
+| Сторона | Коммит |
+| --- | --- |
+| Общая база форка | `ba6344a59cb9e755b730dcf02285fc0d33b97d3c` |
+| Сохранённый первый срез до синхронизации | `595ac61667bd232f0cf0dee2182af0fcfed1a4a1` |
+| Прочитанный `upstream/main` | `3c68c05d0acabd638dc15158a1d68e121577ec81` |
+
+Вершина upstream — [merge PR #1171, macOS on Intel](https://github.com/horizon-rust/horizon/commit/3c68c05d0acabd638dc15158a1d68e121577ec81), время коммита 31 октября, 14:47:21 МСК. Это зафиксированный снимок, а не обещание неизменного latest.
+
+Между общей базой и снимком upstream: **1604 коммита**, **514 коммитов по first-parent**, **772 изменённых файла**, **96 784 добавленные и 8 649 удалённых строк**. Эти числа включают историю веток; 1604 не означает 1604 самостоятельных PR. Первый срез перед интеграцией сохранён отдельным коммитом `595ac6166`, поверх четырёх предыдущих коммитов NPC-расширения.
+
+Аудит включает fetch, сравнение деревьев и сигнатур, GitHub metadata merged PR и чтение объединённых исходников. Интеграция выполнена основным разработчиком через merge с ручным сохранением расширения. Read-only ревью не меняло код. Push upstream остаётся `DISABLED_UPSTREAM_PUSH`; оригинальный репозиторий не менялся. Полный набор тестов и игровой прогон объединённой версии на момент ревью ещё не завершены.
+
+## Совместимость API
+
+Upstream теперь объявляет **Native Hooks API 40**. Его API 4 — серверные tick hooks `native_server_tick`, а не наши самостоятельные NPC. Основание: [точный файл native_hooks.rs на снимке](https://github.com/horizon-rust/horizon/blob/3c68c05d0acabd638dc15158a1d68e121577ec81/crates/horizon-client/src/game/native_hooks.rs).
+
+В объединённых исходниках используются независимые версии:
+
+- `NATIVE_HOOKS_API = 40` — сохранённый upstream-контракт.
+- `OWNED_NPCS_API = 1` — отдельная версия расширения форка. Бандл должен проверять эту возможность отдельно от числа hooks.
+- Локальные helper-методы не занимают отдельный номер upstream hooks. Историческое имя нашего прототипа «API 4» не обозначает upstream-совместимость.
+
+## Результат ревью объединённых исходников
+
+- `native_hooks.rs` относительно закреплённого upstream содержит только добавления: marker расширения и семь `native_npc_*` helpers. Все upstream native-методы сохранены; значение hooks остаётся 40. `native-hooks.json` не отличается от upstream.
+- `docs/native-mods.md` сохраняет upstream-описание API 1–40 и дополняется ссылкой на независимое расширение. Новый API не заменён прежним сокращённым файлом форка.
+- `/civ` регистрируется в новом серверном дереве при включённом режиме; вызов обрабатывается с состоянием действующего игрока до обычного `native_perform_command`. Остальные native-команды продолжают попадать в upstream-hook. Дополнительный локальный dispatch сохранён для developer/control пути. Доступ без operator и ответы клиенту требуют живого прогона.
+- Грамота проверяется в серверном `use_hand` после `native_right_click_block`: если upstream-hook отменил действие, основание не выполняется. Успешно обработанная грамота завершает действие до обычного звонка колокола. Повторной отдельной обработки в `lan_actions` нет: сохранены upstream reach, hit, border и spawn-protection проверки и обычный `as_guest → use_item`.
+- NPC по-прежнему живут в собственном `BTreeMap` акторов и версионированном реестре. Физическое тело классифицируется как inert Mannequin и не попадает в `Game::mobs`. Движение вызывает низкоуровневую физику и навигацию, а не `Mob::tick`, Brain или POI. Изменившийся вызов `nav_move_to_path(world, path, 0.65)` адаптирован; renderer переведён на upstream atlas callback.
+- Отправка снимков NPC добавлена рядом с upstream flush-путём, который сохраняет новые net/menu очереди. Приём по-прежнему ограничен собственным integrated host; это **не** подтверждённый внешний кооператив. Очистка зеркал при выходе и смене измерения сохранена.
+- В момент ревью Git index ещё содержит unmerged stages для четырёх вручную разрешённых файлов; перед merge-коммитом необходимо поставить разрешённые версии в index. Отсутствие маркеров в компилируемом тексте не заменяет завершение Git merge.
+
+Статус проверки: чтение diff и компиляция — выполнены; окончательные тесты после последнего command adapter, оптимизированная сборка и игровая проверка — ожидаются. Этот статус не подтверждает прохождение старых NPC-сценариев на новой базе.
+
+Новые upstream helpers видят ванильные сущности и не реализуют наш контракт владения, стабильных ключей, самостоятельного контроллера и tombstone. [PR #4799 — Native mods: helpers for spawning and moving mobs](https://github.com/horizon-rust/horizon/pull/4799) полезен для работы с обычными мобами, но не заменяет Owned NPC.
+
+## Возможности upstream и дальнейшее использование
+
+| Задача Civilization | Merged upstream возможность | Решение при переносе |
+| --- | --- | --- |
+| Команды без operator, проверенный игрок, ответы | [#4514 — Native mods: server commands and players](https://github.com/horizon-rust/horizon/pull/4514), API 8 | `/civ` уже подключён к серверной регистрации и dispatch в собственном adapter. В дальнейшем можно вынести его в native-бандл на публичных hooks вместо прямого дополнения движка |
+| Считать, забрать и выдать материалы | [#4519 — Native mods: the acting player's plain items for server mods](https://github.com/horizon-rust/horizon/pull/4519), API 9 | Использовать `native_count_items`, `native_take_items`, `native_give_items`, `native_room_for`; они учитывают обычные стаки и offhand, исключают броню и предметы с компонентами |
+| Обзор и выбор общественных проектов | [#4534 — Native mods: server menus and an atomic item exchange](https://github.com/horizon-rust/horizon/pull/4534), API 10 | `native_open_menu` и `native_menu_clicked` дают серверное меню с безопасными display-only слотами; оно лучше временной чат-консоли для первого интерфейса |
+| Будущая ратуша/склад как блок с интерфейсом | [#4055 — Native mods: item slots for mod block entities](https://github.com/horizon-rust/horizon/pull/4055), [#4106 — Native mods: mod-drawn screens for mod blocks](https://github.com/horizon-rust/horizon/pull/4106), [#4289 — Native mods: buttons, tooltips and item icons on mod screens](https://github.com/horizon-rust/horizon/pull/4289) | Контейнеры, GUI-текстуры, раскладка, кнопки и серверная обработка доступны. Произвольное окно цивилизации не появляется само: mod-block screen привязан к mod-блоку/меню |
+| Грамота на колоколе, стартовый набор и разговор | API 13 `native_use_item_on`, API 21 `native_right_click_block`, API 31 `native_player_tick`, API 29 `native_interact_entity` | Старый прямой перехват грамоты из `lan_actions` заменён общим `use_hand` после cancel-hook. Взаимодействие с нашими отдельными NPC всё ещё требует собственного hit-testing/идентификации: vanilla entity hook сам по себе не видит их render-only mirrors |
+| Клиент-серверные сообщения | [#4669 — Native mods: mod messages and event hook points](https://github.com/horizon-rust/horizon/pull/4669), API 40 | Использовать общий транспорт для намерений/данных Civilization, с собственным протоколом и проверкой capability |
+| Подсказки команд в чате | [#4893 — Chat: native mods' commands join the tree the chat colours and completes](https://github.com/horizon-rust/horizon/pull/4893), API 35 | Декларировать клиентские команды, если нужны; серверные команды уже регистрируются отдельно через API 8 |
+
+**Граница атомарности:** `native_take_items(item, count)` возвращает фактически снятое количество, а не выполняет весь многоресурсный проект одной транзакцией. Перед сдачей нескольких видов материалов всё ещё нужны общая проверка, сериализация действия, фиксация прогресса и защита от повторной награды. `native_exchange_items(a, a_offer, b, b_offer)` атомарно обменивает конкретные стаки двух разных игроков; это не готовый метод «оплатить городской проект» и не транзакция между инвентарём и JSON-сохранением общины. Наши гарантии нельзя просто заменить несколькими вызовами take.
+
+**Граница GUI:** data slots mod-block screen 16-битные на wire и могут быть пусты до первого пакета. Большие ресурсы и индексы нельзя бездумно передавать одним `i32` slot. Новый транспорт подходит для полноценного снимка состояния, но схему, лимиты, клиентскую валидацию и права придётся реализовать.
+
+**Граница сети:** upstream `horizon:mod_net` принимает канал `mod_id:name`, до 30 000 байт сообщения и 32 сообщений на игрока за tick. Отправка до join отвергается; сервер шлёт сообщения клиентам с Horizon brand. Это полезная базовая проверка транспорта, но не согласование версии нашего мода. Нужен отдельный handshake. Наш старый owned-NPC snapshot допускает 256 KiB, поэтому его нельзя целиком перенести в одно новое сообщение: потребуются меньшие снимки/части или собственный согласованный канал. Нынешняя поддержка только своего integrated host не становится внешним кооперативом автоматически.
+
+## Пересечения и точные места адаптации
+
+До интеграции у расширения и upstream изменены одни и те же девять путей: `game.rs`, `game/control.rs`, `game/lan.rs`, `game/native_hooks.rs`, `game/native_lifecycle.rs`, `game/remote.rs`, `lib.rs`, `mobs.rs`, `docs/native-mods.md`. Основные конфликты hooks, LAN, remote и документации разрешены вручную с сохранением upstream-поведения и локальных дополнений.
+
+Первый игровой срез также затрагивает `game/commands.rs` и прежде затрагивал `game/lan_actions.rs`; upstream значительно изменил оба файла. Срез зафиксирован коммитом до начала merge, а текущая обработка грамоты больше не требует delta в `lan_actions.rs`.
+
+Точные изменения сигнатур/поведения, которые нужно учесть:
+
+1. **Навигация — адаптирована несовместимость вызова.** Было `Mob::nav_move_to_path(&mut self, path: Option<Path>, speed: f64) -> bool`; стало `Mob::nav_move_to_path(&mut self, w: &MobWorld, path: Option<Path>, speed: f64) -> bool`. Наш `owned_npc_actor.rs` теперь передаёт `world`. Новый аргумент нужен для `trim_path`. Исходник: [mobs/nav.rs](https://github.com/horizon-rust/horizon/blob/3c68c05d0acabd638dc15158a1d68e121577ec81/crates/horizon-client/src/mobs/nav.rs).
+2. **Изменившиеся блоки и пути.** [#4596 — Mobs re-path when a block changes near their route](https://github.com/horizon-rust/horizon/pull/4596) добавил `pending_recompute`, `should_recompute_path`, `queue_path_recompute` и `mobs::blocks_changed`. Ванильный список мобов получает уведомления об изменениях коллизий; наши акторы хранятся отдельно. Нельзя предполагать, что новая автоматическая реакция включится для них сама. Сохранить собственный repath и отдельно подключить уведомления, проверив отмену/переназначение.
+3. **Размеры мира.** Навигация теперь использует `world.bottom_y()` вместо глобального `MIN_Y`; появились level shapes. Добавлены поля `MobWorld`, в том числе `leash_boats`. Наш runtime использует `Game::mob_world_base`; совместимость старых тестовых фикстур ещё проверяется. Валидация собственного NPC по высоте остаётся ограниченной обычным Overworld −64…319: поддержку произвольных custom level shapes нельзя заявлять по одной успешной компиляции.
+4. **Lifecycle и загрузка.** Добавлены `ServerTickPhase`, read-scope и start/end server-tick доставка. Встроенный сервер теперь заканчивает открытие через `finish_open_world(opening.world?.finish()?)`, раньше использовал `load_world(WorldRequest::new(...))`. Сохранить порядок восстановления индексов до `ensure`; не привязывать новый runtime только к старой строке вызова. [native_lifecycle.rs](https://github.com/horizon-rust/horizon/blob/3c68c05d0acabd638dc15158a1d68e121577ec81/crates/horizon-client/src/game/native_lifecycle.rs).
+5. **LAN/remote.** В конце tick появились очереди mod-message и menu-events; текущую отправку owned-NPC нельзя вставлять с предположением о прежнем владении `LanHost`. Сохранить очередь, пределы сообщений и очистку зеркал при выходе/смене измерения. [native_net.rs](https://github.com/horizon-rust/horizon/blob/3c68c05d0acabd638dc15158a1d68e121577ec81/crates/horizon-client/src/game/native_net.rs).
+6. **Сохранения.** `save.rs` изменился на +1007/−54 строки. Важны level.dat fallback, disk-space/session-lock проверки и запись dedicated уровня без player. Отдельные `horizon-owned-npcs.json`/данные Civilization автоматически в chunk/save transaction не включаются. Сохранить отказ от перезаписи повреждённого индекса, atomic replace и проверку повторного запуска. [#4879 — server-level-dat-fallback](https://github.com/horizon-rust/horizon/pull/4879), [#4866 — dedicated-playerdata-overwrite](https://github.com/horizon-rust/horizon/pull/4866).
+
+Новые content block entities, inventories и menus дают путь к настоящим складам/ратушам. Они не предоставляют автоматически импорт произвольной модели/PNG для нашего renderer. Поддержку NPC-внешности нужно отдельно проверить после обновления atlas/content pipeline.
+
+## Что осталось перед поставкой и следующим этапом
+
+1. Повторить compile/test после последних командных изменений, проверить hooks/catalog, модели прогресса, inventory adapters, NPC и snapshot codec. Завершить merge-коммит на отдельной ветке.
+2. Собрать отдельное приложение и прогнать полный путь первого среза: книга/грамота → деревня → проекты с реальным расходом → Староста → перезапуск без дубликатов. Проверить `/civ` и грамоту без operator.
+3. Повторить owned-NPC сценарии на новой базе: движение вокруг стены, таймер работы, отмена/переназначение, сохранение/восстановление и despawn. Старый отчёт 30 октября не заменяет новый прогон.
+4. Записать фактический merge SHA, hash бинарника, инструкцию и результаты рядом с отдельным пакетом. Если какие-то проверки не прошли или не запускались, отразить это в отчёте.
+5. Следующим отдельным этапом добавить handshake и внешнюю сетевую синхронизацию Civilization/NPC с лимитами. Проверить два настоящих клиента: права, одновременные взносы, общий прогресс, отсутствие дублей, переподключение и отказ несовместимому клиенту.
+
+Этот обзор подтверждает состав интеграции исходников и сохраняемые контракты, но не заменяет финальную проверку приложения и не является полным аудитом всех 772 файлов upstream.

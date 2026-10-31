@@ -1,4 +1,4 @@
-//! Render-only replication for independently owned NPCs on the local server.
+//! Render-only replication for independently owned NPCs on compatible servers.
 //!
 //! The custom channel carries complete, bounded snapshots. It never registers
 //! vanilla entities or invokes a client-side controller, navigation or physics.
@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, time::Instant};
 
 pub(super) const CHANNEL: &str = "horizon:owned_npcs";
+pub(super) const CAPABILITY_CHANNEL: &str = "horizon:owned_npc_capabilities";
+const CAPABILITY_VERSION: &[u8] = &[1];
+fn capability_supported(bytes: &[u8]) -> bool {
+    bytes == CAPABILITY_VERSION
+}
 const VERSION: u32 = 1;
 const MAX_NPCS: usize = 128;
 const MAX_BYTES: usize = 256 * 1024;
@@ -114,7 +119,9 @@ impl MirrorNpc {
 impl Game<'_> {
     /// Every second server tick, send the current level only to loaded guests.
     /// The local integrated player is a guest on the same transport.
-    pub(super) fn send_owned_npc_snapshot(&self, hub: &Hub) {
+    pub(super) fn send_owned_npc_snapshot(&mut self, hub: &Hub) {
+        self.owned_npc_connections
+            .retain(|conn| hub.guests.iter().any(|guest| guest.conn == *conn));
         if self.remote.is_some()
             || !self.has_owned_npc_backend()
             || !self.ticks.is_multiple_of(SNAPSHOT_INTERVAL)
@@ -138,22 +145,68 @@ impl Game<'_> {
             channel: CHANNEL.into(),
             data: bytes,
         });
-        for guest in hub
-            .guests
-            .iter()
-            .filter(|guest| hub.here(guest) && guest.loaded)
-        {
+        for guest in hub.guests.iter().filter(|guest| {
+            hub.here(guest) && guest.loaded && self.owned_npc_connections.contains(&guest.conn)
+        }) {
             guest.send(&packet);
         }
     }
 
+    /// The dedicated snapshot channel retains its 256 KiB bound independently
+    /// of native_net's 30 KiB messages. Negotiation grants rendering only.
+    pub(super) fn guest_owned_npc_capabilities(&mut self, hub: &Hub, conn: u32, bytes: &[u8]) {
+        self.owned_npc_connections
+            .retain(|known| hub.guests.iter().any(|guest| guest.conn == *known));
+        if !capability_supported(bytes) || self.owned_npc_connections.len() >= 1024 {
+            return;
+        }
+        let Some(guest) = hub
+            .guests
+            .iter()
+            .find(|guest| guest.conn == conn && guest.loaded && guest.placed)
+        else {
+            return;
+        };
+        self.owned_npc_connections.insert(conn);
+        guest.send(&Clientbound::CustomPayload(CustomPayload {
+            channel: CAPABILITY_CHANNEL.into(),
+            data: CAPABILITY_VERSION.to_vec(),
+        }));
+    }
+
+    pub(super) fn offer_owned_npc_capabilities(&self) {
+        if self.remote.is_some() {
+            self.send(horizon_protocol::packets::play::Serverbound::CustomPayload(
+                CustomPayload {
+                    channel: CAPABILITY_CHANNEL.into(),
+                    data: CAPABILITY_VERSION.to_vec(),
+                },
+            ));
+        }
+    }
+
+    /// Login can precede the server's player-loaded packet. Offer once more
+    /// after that packet, in transport order, instead of accepting unloaded peers.
+    pub(super) fn offer_loaded_owned_npc_capabilities(&mut self, loaded: bool) {
+        if !self.owned_npc_negotiated && !self.owned_npc_loaded_offer && loaded {
+            self.owned_npc_loaded_offer = true;
+            self.offer_owned_npc_capabilities();
+        }
+    }
+
+    pub(super) fn accept_owned_npc_capabilities(&mut self, bytes: &[u8]) {
+        if self.remote.is_some() && capability_supported(bytes) {
+            self.owned_npc_negotiated = true;
+        }
+    }
+
     /// Unknown channels are left alone. Malformed packets retain the last good
-    /// mirror set; this initial backend accepts only our own integrated host.
+    /// mirror set; only a version-negotiated connection supplies snapshots.
     pub(super) fn handle_owned_npc_payload(&mut self, payload: &CustomPayload) -> bool {
         if payload.channel != CHANNEL {
             return false;
         }
-        if self.integrated.is_none() || self.remote.is_none() {
+        if !self.owned_npc_negotiated || self.remote.is_none() {
             return true;
         }
         if let Err(error) = self.apply_owned_npc_payload(&payload.data) {
@@ -260,12 +313,18 @@ impl Game<'_> {
             let packed = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
             let start = out.len();
             self.mark_entity(start, &mob.kind.id);
-            mobs::render(
+            // The renderer now resolves textures through an atlas callback.
+            // Expose only this NPC's validated appearance; no vanilla variant
+            // or equipment texture can replace it or add an unrelated layer.
+            let uv = [rect.u0, rect.v0, rect.u1, rect.v1];
+            let atlas = |requested: &str| (requested == texture.as_str()).then_some(uv);
+            mobs::render::render(
                 mob,
                 mirror.fraction(now) as f32,
                 camera,
-                [rect.u0, rect.v0, rect.u1, rect.v1],
+                &atlas,
                 packed,
+                self.res.mob_data(),
                 out,
             );
             self.cull_entity_vertices(out, start);
@@ -277,6 +336,14 @@ impl Game<'_> {
 mod tests {
     use super::*;
     use horizon_mods::owned_npcs::{Appearance, EnsureNpc, Position};
+
+    #[test]
+    fn capability_requires_the_exact_supported_version() {
+        assert!(capability_supported(&[1]));
+        for unsupported in [&[][..], &[0][..], &[2][..], &[1, 0][..], &[1, 1][..]] {
+            assert!(!capability_supported(unsupported));
+        }
+    }
 
     fn snapshot() -> Snapshot {
         let mut registry = Registry::default();

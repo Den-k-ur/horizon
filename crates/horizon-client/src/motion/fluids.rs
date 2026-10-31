@@ -72,6 +72,7 @@ impl FluidResources {
     }
 }
 /// The player's `EntityFluidInteraction` and the water flags around it.
+#[derive(Clone)]
 pub struct PlayerFluids {
     pub interaction: EntityFluidInteraction,
     /// `Entity.wasTouchingWater` (`isInWater`).
@@ -302,10 +303,10 @@ impl FluidInteractionWorld for MotionWorld<'_, '_, '_> {
     fn chunk_sections(&mut self, _: ()) -> Result<FluidSections<'_>> {
         // Resident sections keep no fluid count: scanning the box finds no
         // fluid where a section without fluid would have skipped it.
-        static SECTIONS: [bool; crate::chunk::SECTIONS] = [true; crate::chunk::SECTIONS];
+        let layout = self.scene.layout();
         Ok(FluidSections {
-            minimum_section_y: crate::chunk::MIN_Y >> 4,
-            has_fluid: &SECTIONS,
+            minimum_section_y: layout.min_y() >> 4,
+            has_fluid: crate::chunk::every_section(layout),
         })
     }
     fn bounding_box_min_y(&self) -> f64 {

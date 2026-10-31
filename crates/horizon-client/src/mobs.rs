@@ -20,7 +20,9 @@ pub mod brain;
 pub mod breeze;
 pub mod camel;
 pub mod caravan;
+pub mod combat;
 pub mod control;
+pub mod conversion;
 pub mod copper_golem;
 pub mod creaking;
 pub mod creaking_heart;
@@ -44,6 +46,7 @@ pub mod happy_ghast;
 pub mod hostile;
 pub mod illager;
 pub mod illusioner;
+pub mod item_break;
 pub mod keyframes;
 pub mod leash;
 pub mod living;
@@ -567,6 +570,8 @@ pub enum DamageKind {
     Stalagmite,
     /// `starve`: no food left.
     Starve,
+    /// `hot_floor`: stepping on a magma block.
+    HotFloor,
     /// `sulfur_cube_hot`: a sulfur cube's hot floor (a fire).
     SulfurCubeHot,
     /// `wind_charge`: a wind charge's burst (a projectile).
@@ -692,6 +697,7 @@ impl Damage {
             DamageKind::OnFire
                 | DamageKind::InFire
                 | DamageKind::Campfire
+                | DamageKind::HotFloor
                 | DamageKind::Lava
                 | DamageKind::Fireball
                 | DamageKind::SulfurCubeHot
@@ -706,6 +712,7 @@ impl Damage {
                 | DamageKind::OnFire
                 | DamageKind::InFire
                 | DamageKind::Campfire
+                | DamageKind::HotFloor
                 | DamageKind::Lava
                 | DamageKind::Drown
                 | DamageKind::DryOut
@@ -804,6 +811,8 @@ pub struct Extra {
     pub body_extra: Option<Box<crate::item_data::StackData>>,
     /// `Cat.RELAX_STATE_ONE`: watching a sleeping owner before lying down.
     pub relax_one: bool,
+    /// `Cat.isLyingOnTopOfSleepingPlayer` (the client's own, from `Cat.handleLieDown`).
+    pub on_sleeper: bool,
     /// The saddle's components (name, enchantments...) when it is not a bare
     /// one; `saddled` stays the gameplay flag.
     pub saddle_stack: Option<crate::items::ItemStack>,
@@ -857,14 +866,28 @@ pub struct Extra {
     pub blocking: bool,
     pub fall_flying: bool,
     pub fall_fly_ticks: i32,
+    /// `Entity.deltaMovementOnPreviousTick`: the velocity before this tick's
+    /// move, which the elytra lean interpolates from (`getDeltaMovementLerped`).
+    pub previous_velocity: Vec3,
     /// `Entity.DATA_POSE` of another player, as the server sent it.
     pub synced_pose: u8,
     /// `LivingEntity.isAutoSpinAttack` (Riptide).
     pub auto_spin_attack: bool,
+    /// `LivingEntity.DATA_ARROW_COUNT_ID`: the arrows stuck in a player
+    /// (`ArrowLayer`).
+    pub arrow_count: i32,
+    /// `LivingEntity.DATA_STINGER_COUNT_ID`: the bee stingers stuck in a
+    /// player (`BeeStingerLayer`).
+    pub stinger_count: i32,
+    /// `Player.DATA_SHOULDER_PARROT_LEFT` and `_RIGHT`: the variant of the
+    /// parrot on each shoulder (`ParrotOnShoulderLayer`).
+    pub shoulder_parrots: [Option<i32>; 2],
     pub main_hand_left: bool,
     /// The skin layers a player hides (`PlayerModelPart` bits, set to
     /// `Avatar.DATA_PLAYER_MODE_CUSTOMISATION` inverted); 0 shows all.
     pub hidden_model_parts: u8,
+    /// `AvatarRenderState.isSpectator`: a player in spectator mode shows only its head.
+    pub spectator: bool,
     pub elytra: ElytraAnimation,
     pub swim: SwimAnimation,
     /// `ClientAvatarState` of a player: the cloak, bob and walked distance its cape swings with.
@@ -876,6 +899,10 @@ pub struct Extra {
     pub swing_stab: bool,
     pub flag: bool,
     pub flag2: bool,
+    /// `AbstractHorse.allowStandSliding`: the rider's jump sets it, and a
+    /// horse still rearing then goes on with the rider's keys until the rear
+    /// ends (`tick` clears it).
+    pub stand_sliding: bool,
     /// Species scratch values (the wither's head targets and clocks).
     pub ints: [i32; 6],
     pub counter: i32,
@@ -969,6 +996,11 @@ pub struct Extra {
     pub lone: bool,
     /// The fish that follow this one (`AbstractSchoolingFish.schoolSize` - 1).
     pub followers: i32,
+    /// The entity section it is in and when it entered it (a global sequence):
+    /// vanilla's entity queries list the entities of a section in the order they
+    /// entered it, the sections by x, z, y.
+    pub section: [i32; 3],
+    pub section_seq: u64,
     /// A breeze's or creaking's brain (`monster_brain`).
     pub brain: Option<Box<monster_brain::Brain>>,
     /// A bee's nectar, anger, flower and hive state.
@@ -1077,6 +1109,8 @@ pub struct Mob {
     pub air: i32,
     pub last_hurt: f32,
     pub last_damage: Option<(Damage, i64)>,
+    /// `LivingEntity.combatTracker`: the hits taken lately.
+    pub combat: combat::Tracker,
     /// Set by `remove`: the mob disappears without dying (conversion, despawn, pickup).
     pub removed: bool,
     /// Client-side animation clocks (attack swing, eating, shaking...).
@@ -1233,6 +1267,13 @@ pub enum MobEvent {
         state: horizon_world::registry::BlockStateId,
     },
     AttackPlayer(f32, [f64; 3]),
+    /// `Bee.doHurtTarget` on a player: a sting that lands leaves its stinger
+    /// in them and poisons them for `poison_ticks` (none on easy).
+    StingPlayer {
+        amount: f32,
+        from: [f64; 3],
+        poison_ticks: i32,
+    },
     /// A melee hit whose effect comes only if the hit lands (husk hunger,
     /// cave spider poison, wither skeleton wither, bee and pufferfish
     /// poison): a shield-blocked hit gives nothing.
@@ -1304,6 +1345,23 @@ pub enum MobEvent {
         amount: f32,
         source: Damage,
     },
+    /// `AbstractCubeMob.dealDamage` on the player (`playerTouch`): the hit,
+    /// then, only when `hurtServer` let it land, the cube's
+    /// `entity.slime.attack` with its pitch drawn from the cube's random.
+    CubeHurtPlayer {
+        cube: u32,
+        amount: f32,
+        from: [f64; 3],
+    },
+    /// `AbstractCubeMob.dealDamage` on a mob (an iron golem it touches): the
+    /// hit, then, only when `hurtServer` let it land, the cube's
+    /// `entity.slime.attack` with its pitch drawn from the cube's random.
+    CubeHurtMob {
+        cube: u32,
+        target: u32,
+        amount: f32,
+        source: Damage,
+    },
     /// `LivingEntity.stabAttack`'s `target.stopRiding()`: a spear knocks the
     /// target off its mount.
     StabDismount {
@@ -1350,6 +1408,14 @@ pub enum MobEvent {
         kind: String,
         at: [f64; 3],
         setup: SpawnSetup,
+    },
+    /// `Mob.convertTo` with `ConversionType.SINGLE` ([`conversion::single`]):
+    /// a new mob of `kind` takes the place of `from` (already removed) and
+    /// keeps its gear, name and flags.
+    Convert {
+        from: Box<Mob>,
+        kind: &'static str,
+        params: conversion::Params,
     },
     DropItem {
         item: Arc<str>,
@@ -1470,6 +1536,7 @@ pub enum MobEvent {
         pos: [i32; 3],
         name: &'static str,
         effect: bool,
+        flags: i32,
     },
     /// A cat hisses (phantoms flee).
     Hiss {
@@ -1502,6 +1569,12 @@ pub enum MobEvent {
     VillagerMeet {
         mob: u32,
         other: u32,
+    },
+    /// `AbstractVillager.getOffers` for a villager whose offers are not made
+    /// yet: the level rolls them (the brain has no trade data), so the
+    /// behaviour that asked reads them from the next tick on.
+    VillagerOffers {
+        mob: u32,
     },
     /// Two villagers make a baby (`VillagerMakeLove.tryToGiveBirth`): the
     /// parent has eaten and, with a bed for the child, rests; the partner
@@ -1566,6 +1639,11 @@ pub enum MobEvent {
         drop: bool,
         sound: bool,
     },
+    /// `Leashable.whenLeashedTo`: the holder is told a quad-leashed mob hangs
+    /// on it (`HappyGhast.notifyLeashHolder`).
+    NotifyLeashHolder {
+        holder: u32,
+    },
     /// A zombie villager's cure is complete: the game turns it back into a villager.
     CureZombieVillager {
         mob: u32,
@@ -1611,6 +1689,13 @@ pub enum MobEvent {
     /// `Panda.afterSneeze`: the grown pandas within 10 blocks start.
     PandaSneezed {
         mob: u32,
+    },
+    /// `Entity.propagateFallToPassengers`: the mob landed and what rides it
+    /// (a player or a mob) takes `causeFallDamage` of the same fall.
+    FallToPassengers {
+        mob: u32,
+        distance: f64,
+        modifier: f32,
     },
 }
 /// How a spawned-by-kind mob should be set up.
@@ -1668,6 +1753,8 @@ pub struct Seen {
     pub caravan: u32,
     /// A schooling fish's leader and how many fish follow it.
     pub school: (Option<u32>, i32),
+    /// `MobExtra::section` and `section_seq`.
+    pub section: ([i32; 3], u64),
     /// A wandering trader's despawn delay.
     pub delay: i32,
     /// `getLastHurtByMob` and its timestamp.
@@ -1803,6 +1890,7 @@ impl Mob {
             leash: m.extra.leash,
             caravan: caravan::head_of(m),
             school: (m.extra.leader, m.extra.followers),
+            section: (m.extra.section, m.extra.section_seq),
             delay: m.extra.ints[5],
             hurt_by: m.ai.last_hurt_by.map(|w| (w, m.ai.last_hurt_by_time)),
             active_raid: raider::has_active_raid(m),
@@ -1901,6 +1989,21 @@ impl PendingPushes {
     }
 }
 /// Adds the pending pushes aimed at `m` to its velocity, in push order.
+/// `ServerLevel.sendBlockUpdated`: for each write that changed a block's collision
+/// shape, a mob whose path runs near it re-paths (`PathNavigation.shouldRecomputePath`).
+pub fn blocks_changed(m: &mut Mob, w: &MobWorld, writes: &[((i32, i32, i32), u32, u32)]) {
+    if m.ai.nav.is_done() {
+        return;
+    }
+    for &((x, y, z), old, new) in writes {
+        let at = [x, y, z];
+        let shape = |state| w.collision_bounds_of(horizon_world::registry::BlockStateId(state), at);
+        if shape(old) != shape(new) && m.should_recompute_path(at) {
+            m.queue_path_recompute();
+            return;
+        }
+    }
+}
 pub fn apply_mob_pushes(m: &mut Mob, pending: &mut PendingPushes) {
     // Entity.push(x, y, z) sets needsSync.
     let mut add = |v: Vec3| {
@@ -2026,6 +2129,17 @@ pub struct PlayerView {
     pub sleep_timer: u32,
     /// `isPassenger`.
     pub passenger: bool,
+    /// The boat or nautilus the player rides and steers
+    /// (`getControllingPassenger`).
+    pub vehicle: Option<Vehicle>,
+}
+/// What a player rides, for the mobs that follow it (`FollowPlayerRiddenEntityGoal`).
+#[derive(Clone, Debug)]
+pub struct Vehicle {
+    pub nautilus: bool,
+    pub bounds: Aabb,
+    /// `Entity.getKnownSpeed`: what it moved in its last tick.
+    pub velocity: Vec3,
 }
 impl PlayerView {
     /// `LivingEntity.getVisibilityPercent` without the worn-skull scaling.
@@ -2059,6 +2173,8 @@ pub struct MobWorld<'a> {
     /// player in the level stands, alive or not (the despawn distance).
     pub nearest_player: Option<Vec3>,
     pub others: &'a [Seen],
+    /// The boats and rafts a lead can hang on (`Holder::Boat`): id and state.
+    pub leash_boats: &'a [(u32, leash::HolderState)],
     /// `others` by position, when the caller keeps one (the mob ticks).
     pub others_grid: Option<&'a seen_grid::SeenGrid>,
     /// Where each id stands in `others`, when the caller keeps one.
@@ -2170,6 +2286,7 @@ impl Mob {
             air: 300,
             last_hurt: 0.0,
             last_damage: None,
+            combat: combat::Tracker::default(),
             removed: false,
             custom_name: None,
             custom_name_text: None,
@@ -2237,6 +2354,17 @@ impl Mob {
                 position.z + w,
             ),
         )
+    }
+    /// `CombatTracker.recordDamage`: a hit that took `damage` health, with
+    /// the fall it ends.
+    pub fn record_damage(&mut self, source: Damage, damage: f32) {
+        let entry = combat::Entry {
+            source,
+            damage,
+            in_water: self.fluids.in_water,
+            fall_distance: self.fall_distance as f32,
+        };
+        self.combat.record(entry, self.age);
     }
     pub fn alive(&self) -> bool {
         self.health > 0.0
@@ -2385,7 +2513,7 @@ impl Mob {
         // Wolf.actuallyHurt: wolf armor takes the damage instead of the wolf.
         let absorbed = self.wolf_armor_absorbs(&source);
         let mut knock = true;
-        if self.invulnerable as f32 > 10.0 {
+        let dealt = if self.invulnerable as f32 > 10.0 {
             if amount <= self.last_hurt {
                 return false;
             }
@@ -2397,6 +2525,7 @@ impl Mob {
             }
             self.last_hurt = amount;
             knock = false;
+            dealt
         } else {
             self.last_hurt = amount;
             self.invulnerable = 20;
@@ -2406,6 +2535,13 @@ impl Mob {
                 self.health -= amount;
             }
             self.hurt_time = 10;
+            amount
+        };
+        // LivingEntity.actuallyHurt: a hit that reaches the health is
+        // recorded (`CombatTracker.recordDamage`), with the fall it ends;
+        // Wolf.actuallyHurt keeps a hit its armor takes out of it.
+        if !absorbed && dealt != 0.0 {
+            self.record_damage(source, dealt);
         }
         // Animal.actuallyHurt: damage taken ends love mode (`resetLove`).
         if drops::is_animal(self.species()) {
@@ -2569,7 +2705,24 @@ impl Mob {
         level_random: &mut LegacyRandom,
         events: &mut Vec<MobEvent>,
     ) -> bool {
+        self.track_section();
+        // LivingEntity.tick: CombatTracker.recheckStatus.
+        let alive = self.alive();
+        self.combat.recheck(alive, self.age);
         ai::tick(self, w, level_random, events)
+    }
+    /// The section the mob is in, noted when it changes (`EntitySection` lists).
+    fn track_section(&mut self) {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let section = [
+            (self.position.x.floor() as i32) >> 4,
+            (self.position.y.floor() as i32) >> 4,
+            (self.position.z.floor() as i32) >> 4,
+        ];
+        if self.extra.section_seq == 0 || section != self.extra.section {
+            self.extra.section = section;
+            self.extra.section_seq = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     pub fn distance_to(&self, p: [f64; 3]) -> f64 {
         let d = [
@@ -3542,5 +3695,59 @@ mod held_stack_tests {
         extra.take_main_hand();
         assert!(extra.main_hand.is_none());
         assert!(extra.main_hand_stack().is_none());
+    }
+}
+
+#[cfg(test)]
+mod magic_absorb_tests {
+    use super::sensor_scan_tests::kind;
+    use super::*;
+    use horizon_core::geometry::Vec3;
+
+    fn witch() -> Mob {
+        let mut kind = kind();
+        let k = Arc::make_mut(&mut kind);
+        k.id = "minecraft:witch".into();
+        k.species = Species::Witch;
+        Mob::new(1, kind, Vec3::ZERO, 0.0)
+    }
+
+    /// `Witch.getDamageAfterMagicAbsorb`: `#witch_resistant_to` (`magic`,
+    /// `indirect_magic`, `sonic_boom`, `thorns`) takes 15% of the hit, which
+    /// leaves a 10 health witch on 7 of a 20 hit it would not survive whole.
+    #[test]
+    fn a_witch_takes_15_percent_of_a_witch_resistant_hit() {
+        for resistant in [
+            DamageKind::Magic,
+            DamageKind::IndirectMagic,
+            DamageKind::SonicBoom,
+            DamageKind::Thorns,
+        ] {
+            let mut m = witch();
+            assert!(m.damage(20.0, Damage::of(resistant)));
+            assert_eq!(m.health, 7.0, "{resistant:?} is in #witch_resistant_to");
+        }
+    }
+
+    /// A hit outside the tag (`mob_attack`) takes all of it.
+    #[test]
+    fn a_witch_takes_all_of_a_physical_hit() {
+        let mut m = witch();
+        m.damage(4.0, Damage::of(DamageKind::MobAttack));
+        assert_eq!(m.health, 6.0);
+    }
+
+    /// `Witch.getDamageAfterMagicAbsorb`: a source whose entity is the witch
+    /// itself takes nothing, so its own harming potion cannot hurt it.
+    #[test]
+    fn a_witch_takes_nothing_from_its_own_hit() {
+        let mut m = witch();
+        let own = Damage {
+            kind: DamageKind::IndirectMagic,
+            attacker: Some(Who::Mob(m.id)),
+            from: None,
+        };
+        m.damage(20.0, own);
+        assert_eq!(m.health, 10.0);
     }
 }

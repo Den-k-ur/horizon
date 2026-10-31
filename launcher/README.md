@@ -38,11 +38,10 @@ The opening, then Play ([clip](docs/opening.webm)):
   starts the game. With no install on the computer the Play page offers the download alone and the
   Minecraft folder row says none is needed. Without an owner,
   the Play page asks to sign in first. `horizon-launcher prepare --download`.
-- **Mods**: search Modrinth (CurseForge support is coming soon) for resource
-  packs and modpacks, each marked Works, Partly or Doesn't run in
-  Horizon; Java mod jars are never offered. Install puts a pack and what it needs in
-  `resourcepacks/` only after its SHA-512 matches, and a
-  modpack goes to the Modpacks page; installed packs show their source and checksum, with Update,
+- **Mods**: **Mods** and **Shader packs** search Horizon's own registry (a Java instance's mods
+  come from Modrinth), **Resource packs** searches Modrinth, each marked Works, Partly or Doesn't
+  run in Horizon; Modrinth's data packs aren't usable yet and have no tab. Install puts a file in the game folder only after its checksum matches, and a
+  modpack (the sidebar's +) goes to the Modpacks page; installed packs show their source and checksum, with Update,
   **Update all** and Remove ([docs/mod-browser.md](../docs/mod-browser.md)).
 - **Modpacks**: import a Java modpack (a Modrinth `.mrpack`, a CurseForge zip, or a Prism,
   MultiMC or CurseForge instance folder) and see its coverage report: per mod, ported, partial,
@@ -182,9 +181,9 @@ The opening, then Play ([clip](docs/opening.webm)):
   `datapacks/` under its row: what is there (and which the game has turned off), **Add data pack…**,
   and **Remove** (to the trash); a data pack `.zip` dropped on a world goes into it. The game turns
   a new one on when the world opens. From the command line: `horizon-launcher worlds
-  datapack-list|datapack-add|datapack-remove <world> …`. The Mods page's **Data packs** tab finds
-  them on Modrinth and installs one into the world picked there (`mods search --kind datapack`,
-  `mods install <pack> --world <world>`), saying what of it runs in Horizon.
+  datapack-list|datapack-add|datapack-remove <world> …`. `horizon-launcher mods search --kind datapack`
+  finds them on Modrinth and `mods install <pack> --world <world>` installs one, saying what of it
+  runs in Horizon.
 - **Packs**: Home lists the selected instance's resource packs and shader packs, each with a switch.
   The choice is the game's own: `resourcePacks` in options.txt (a pack turned on goes on top, as
   the game's Resource Packs screen does) and `pickedShaderPack` in `horizon-graphics.txt` (one shader
@@ -282,8 +281,8 @@ set `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` to keep launcher updates with the packag
 Launcher releases are automatic (docs/release-flow.md in the repository): when main changes the
 launcher, `horizon-prepare` or `horizon-theme`, the `launcher` workflow builds Linux, macOS and
 Windows and publishes `launcher-vX.Y.Z` (the next patch, or the next minor after a pull request
-labelled `feature`) with `horizon-launcher-linux-x86_64.tar.gz`, `horizon-launcher-macos-arm64.zip`
-and `horizon-launcher-windows-x64.zip`, never marked latest. The version is built in from the tag
+labelled `feature`) with `horizon-launcher-linux-x86_64.tar.gz`, `horizon-launcher-macos-arm64.zip`,
+`horizon-launcher-macos-x64.zip` (Intel Macs) and `horizon-launcher-windows-x64.zip`, never marked latest. The version is built in from the tag
 (`HORIZON_LAUNCHER_VERSION`); `Cargo.toml`'s version is only what local builds report.
 
 ## Command line
@@ -341,7 +340,7 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher mods remove <pack>
     horizon-launcher servers [list]                 the servers hosted from the launcher, and whether they run
     horizon-launcher servers create [--name N] [--seed S | --copy-world DIR] [--mode M] [--difficulty D]
-                     [--max-players N] [--open] [--check-accounts] [--player NAME]... --accept-eula
+                     [--max-players N] [--open] [--offline] [--player NAME]... --accept-eula
     horizon-launcher servers set-up [--version <tag>]   copy a prepared version's programs and game files for servers
     horizon-launcher servers run <server> -- <horizon-server command>   for example: servers run "My server" -- start
     horizon-launcher servers forget <server>        take it off the list (its folder stays)
