@@ -51,7 +51,7 @@ def main():
             raise RuntimeError(f'No CLI reply to {command}: {stderr}')
         result = json.loads(lines[-1])
         transcript.append({'command': command, 'reply': result})
-        if process.returncode or 'error' in result:
+        if process.returncode or result.get('error'):
             raise RuntimeError(f'{command}: {result}')
         return result
 
@@ -126,7 +126,7 @@ def main():
         ctl('use-item')
         until(lambda: ctl('screen')['screen'] == 'book', message='readable starter book screen')
         ctl('screenshot', proof / 'civilization-guide.png')
-        ctl('key', 'escape', 'tap')
+        ctl('click-button', 'Done')
         until(lambda: ctl('screen')['screen'] == 'playing', message='book closed')
         check('new player receives a readable guide and a marked founding charter once')
 
@@ -222,7 +222,7 @@ def main():
         error = repr(exc)
         raise
     finally:
-        if launched and not (args.leave_running and success):
+        if launched and not args.leave_running:
             try:
                 ctl('save', timeout=30)
                 ctl('quit', timeout=15)

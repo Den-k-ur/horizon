@@ -13068,6 +13068,17 @@ impl Game<'_> {
     pub(super) fn sync_level(&mut self) {
         // Level.write saves the game rules (game_rules.dat) with the rest.
         self.level.game_rules = self.ui.rules.by_name();
+        self.level.difficulty =
+            horizon_client::title::DIFFICULTIES[usize::from(self.ui.difficulty) & 3].into();
+        self.level.time = self.world.game_time;
+        self.level.weather = self.world.weather;
+        self.level.day_time = self.world.day_time;
+        // A server has no local player. Its owner is copied by store_owner
+        // (or save_guest when disconnecting); empty server slots must never
+        // replace that snapshot, including the final save after disconnect.
+        if self.player.is_none() {
+            return;
+        }
         self.level.selected_slot = self.selected as i32;
         let mode = self.mode_id();
         // The vehicle the player rides (`ServerPlayer.saveParentVehicle`).
@@ -13076,12 +13087,6 @@ impl Game<'_> {
         level.creative = self.creative;
         level.game_mode = mode;
         level.previous_game_mode = self.previous_mode.map(game_mode::mode_id_of);
-        // PrimaryLevelData.setDifficulty: /difficulty and the options button change it.
-        level.difficulty =
-            horizon_client::title::DIFFICULTIES[usize::from(self.ui.difficulty) & 3].into();
-        level.time = self.world.game_time;
-        level.weather = self.world.weather;
-        level.day_time = self.world.day_time;
         level.spawn = self.spawn.map(|s| [s.x, s.y, s.z]);
         level.respawn_elsewhere = self.respawn_config.map(|c| c.saved());
         level.rotation = [self.yaw, self.pitch];
@@ -13191,7 +13196,7 @@ impl Game<'_> {
         self.save_warden_tracker();
         self.sync_level();
         self.store_owner();
-        if self.options.dedicated.is_some() {
+        if self.options.execution_role == execution_role::ExecutionRole::DedicatedServer {
             self.level.write_without_player(&self.world_root)?;
         } else {
             self.level.write(&self.world_root)?;

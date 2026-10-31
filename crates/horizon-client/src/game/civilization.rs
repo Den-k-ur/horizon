@@ -73,8 +73,12 @@ impl Game<'_> {
     }
 
     pub(super) fn civilization_status(&self) -> Value {
-        json!({"enabled": self.civilization_enabled(), "error": self.civilization.error,
-            "campaign": self.civilization.registry})
+        let mut status = json!({"enabled": self.civilization_enabled(),
+            "campaign": self.civilization.registry});
+        if let Some(error) = &self.civilization.error {
+            status["error"] = error.clone().into();
+        }
+        status
     }
 
     pub(super) fn tick_civilization(&mut self) {

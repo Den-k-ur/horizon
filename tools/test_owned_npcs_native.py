@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--resources', type=Path, required=True)
     parser.add_argument('--proof-dir', type=Path, required=True)
     parser.add_argument('--leave-running', action='store_true')
+    parser.add_argument('--offscreen', action='store_true')
     parser.add_argument('--reuse-home', type=Path)
     args = parser.parse_args()
     proof = args.proof_dir.resolve()
@@ -72,9 +73,12 @@ def main():
             time.sleep(0.2)
 
     def launch():
-        ctl('launch', '--game', args.game.resolve(), '--world', 'OwnedNpcApiProof', '--seed', '42',
+        words = ['launch', '--game', args.game.resolve(), '--world', 'OwnedNpcApiProof', '--seed', '42',
             '--creative', '--wait', '--resources', args.resources.resolve(), '--no-pause',
-            '--render-distance', '6', timeout=180)
+            '--render-distance', '6']
+        if args.offscreen:
+            words.append('--offscreen')
+        ctl(*words, timeout=180)
 
     def check(name):
         checks.append(name)
@@ -135,6 +139,9 @@ def main():
         ctl('wait', 3)
         ctl('screenshot', proof / 'owned-npc.png')
         before_restart = state()
+        assert not ctl('civilization-state')['enabled']
+        ctl('give', 'minecraft:diamond', 3)
+        until(lambda: ctl('inventory')['counts'].get('minecraft:diamond') == 3)
         ctl('save')
         ctl('quit')
         time.sleep(1)
@@ -147,10 +154,22 @@ def main():
             assert restored[field] == before_restart[field], field
         assert math.dist(list(restored['position'].values()), list(before_restart['position'].values())) < 0.5
         check('world restart restores position/identity/order without a duplicate')
+        until(lambda: ctl('inventory')['counts'].get('minecraft:diamond') == 3)
+        check('owner inventory survives server shutdown with the Civilization campaign disabled')
         rpc('despawn', key='citizen_1')
         until(lambda: ctl('owned-npc-mirrors')['count'] == 0)
         assert state()['presence'] == 'despawned'
         check('despawn removes the visible mirror and keeps the identity tombstone')
+        ctl('command', '/clear @s')
+        until(lambda: not ctl('inventory')['counts'])
+        ctl('save')
+        ctl('quit')
+        time.sleep(1)
+        launch()
+        ctl('wait', 20)
+        assert not ctl('inventory')['counts'], 'Previously saved items resurrected after clearing inventory'
+        assert state()['presence'] == 'despawned'
+        check('an intentionally emptied inventory stays empty after restart without resurrecting items')
         if args.leave_running:
             request['stable_key'] = 'demo_worker'
             request['profession'] = 'builder'

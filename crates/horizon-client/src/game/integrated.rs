@@ -682,6 +682,14 @@ impl Game<'_> {
             for g in &host.hub.guests {
                 self.save_guest(&host, g);
             }
+            self.lan = Some(host);
+        }
+        // ServerPlayer.disconnect: nobody is left in a bed.
+        self.free_player_beds()?;
+        // Copy the live owner before announcing shutdown. If they have already
+        // disconnected, sync_level preserves save_guest's last player snapshot.
+        self.save_game()?;
+        if let Some(host) = self.lan.as_mut() {
             let conns: Vec<u32> = host.hub.guests.iter().map(|g| g.conn).collect();
             for conn in conns {
                 host.hub.kick(
@@ -689,12 +697,7 @@ impl Game<'_> {
                     translatable("multiplayer.disconnect.server_shutdown", &[]),
                 );
             }
-            self.lan = Some(host);
         }
-        std::thread::sleep(Duration::from_millis(100));
-        // ServerPlayer.disconnect: nobody is left in a bed.
-        self.free_player_beds()?;
-        self.save_game()?;
         self.lan_close(false);
         self.save.flush()?;
         // `WorldCloseFinal` follows a successful final save.

@@ -71,7 +71,7 @@ def main():
             raise RuntimeError(f'{who}: no CLI reply to {command}: {stderr}')
         result = json.loads(lines[-1])
         transcript.append({'client': who, 'command': command, 'reply': result})
-        if process.returncode or 'error' in result:
+        if process.returncode or result.get('error'):
             raise RuntimeError(f'{who}: {command}: {result}')
         return result
 
