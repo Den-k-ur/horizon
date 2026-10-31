@@ -968,6 +968,13 @@ fn network_stack(
             ));
         }
     }
+    // Custom data identifies mod items and must survive a server/client round trip.
+    if let Some(data) = s.data().and_then(|d| d.other("minecraft:custom_data")) {
+        stack.added.push((
+            horizon_protocol::item::component::CUSTOM_DATA,
+            horizon_protocol::item::Component::Nbt(data.clone()),
+        ));
+    }
     // Keep the component's styles across integrated-server and LAN inventory sync.
     if let Some(name) = s.data().and_then(|d| d.other("minecraft:custom_name")) {
         stack.added.push((
@@ -1024,6 +1031,25 @@ mod tests {
         assert_eq!(
             received.component(component::CUSTOM_NAME),
             Some(&Component::Text(name))
+        );
+    }
+
+    #[test]
+    fn custom_item_identity_survives_inventory_wire_round_trip() {
+        let marker = Tag::compound([("horizon_civ_charter", Tag::Byte(1))]);
+        let mut item = ItemStack::new("minecraft:paper", 1);
+        item.data_mut()
+            .other
+            .push(("minecraft:custom_data".into(), marker.clone()));
+        let sent = stack_to_network(|_| 7, |_, _| None, &Some(item));
+        let mut writer = Writer::new();
+        horizon_protocol::item::Slot::write(&sent, &mut writer);
+        let received = horizon_protocol::item::Slot::read(&mut Reader::new(&writer.data))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.component(component::CUSTOM_DATA),
+            Some(&Component::Nbt(marker))
         );
     }
 
