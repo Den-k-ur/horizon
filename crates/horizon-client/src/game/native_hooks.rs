@@ -6,7 +6,8 @@
 //! Horizon's own HUD extras do, and keep a mod's settings where the
 //! WebAssembly mod of the same id kept them.
 //!
-//! API 4 adds authoritative owned NPC helpers (identity, orders and appearance).
+//! The fork's OWNED_NPCS_API 1 adds independent NPC helpers. This is separate
+//! from upstream's native hook contract version (which has advanced beyond this base).
 //! API 3 adds the world lifecycle hook (`native_world_lifecycle`).
 //!
 //! API 2 adds the item panel beside container screens and its recipe pages
@@ -39,7 +40,11 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 /// The hook points' API version. The launcher reads this line from the
 /// source it builds; keep its form.
 #[allow(dead_code)]
-pub(crate) const NATIVE_HOOKS_API: u32 = 4;
+pub(crate) const NATIVE_HOOKS_API: u32 = 3;
+
+/// Fork-specific helpers; do not advertise upstream's unrelated API 4 contract.
+#[allow(dead_code)]
+pub(crate) const OWNED_NPCS_API: u32 = 1;
 
 /// The zoom a native mod asks for (`native_zoom`): the factor (1 is none),
 /// eased through the field of view like the spyglass when `smooth`, and the

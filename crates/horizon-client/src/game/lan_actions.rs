@@ -1968,7 +1968,9 @@ impl Game<'_> {
         // the ops list (the guest's permission level).
         let integrated = host.hub.config.integrated;
         let allowed = self.options.dedicated.is_some() || self.allow_commands();
-        if !integrated && (!host.settings.guest_commands || !allowed) {
+        let civilization =
+            self.civilization_enabled() && (command == "civ" || command.starts_with("civ "));
+        if !civilization && !integrated && (!host.settings.guest_commands || !allowed) {
             host.hub.send_to(
                 conn,
                 &C::SystemChat(play::SystemChat {

@@ -2,6 +2,7 @@
 //! assets, no code), modpacks and, with `index`, the mod registry's index. Code mods are
 //! native (docs/native-mods.md).
 pub mod api_level;
+pub mod civilization;
 pub mod content;
 #[cfg(feature = "index")]
 pub mod index;

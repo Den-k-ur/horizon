@@ -91,6 +91,9 @@ fn format_double(v: f64) -> String {
 impl Game<'_> {
     /// Commands.performCommand for a line without its slash.
     pub(super) fn run_command(&mut self, command: &str) -> bool {
+        if self.civilization_command(command) {
+            return true;
+        }
         if self.client_mod_command(command) {
             return true;
         }

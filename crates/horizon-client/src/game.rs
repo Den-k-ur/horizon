@@ -66,6 +66,8 @@ mod cartography;
 mod cat_spawner;
 mod chat;
 mod chiseled_bookshelf;
+mod civilization;
+mod civilization_world;
 mod client_ambient;
 mod clipboard;
 mod code_of_conduct;
@@ -346,6 +348,8 @@ struct Options {
     dimension: Option<String>,
     /// Options.pauseOnLostFocus off (F3+P), for scripted testing.
     no_pause: bool,
+    /// Opt-in Civilization campaign. Existing campaign saves also enable it.
+    civilization: bool,
     /// Control socket path (`--control`), for `horizon-ctl`.
     control: Option<PathBuf>,
     /// `HORIZON_SPIKES=MS`: print the timed spans of frames slower than MS.
@@ -422,6 +426,7 @@ impl Options {
             weather: None,
             dimension: None,
             no_pause: false,
+            civilization: false,
             control: None,
             offscreen: false,
             window_size: [1280, 720],
@@ -463,6 +468,7 @@ impl Options {
                 "--creative" => o.creative = true,
                 "--test-terrain" => o.test_terrain = true,
                 "--no-pause" => o.no_pause = true,
+                "--civilization" => o.civilization = true,
                 "--offscreen" => o.offscreen = true,
                 "--control" => o.control = Some(horizon_client::control::default_path()),
                 "--server-thread" => o.server_thread = true,
@@ -1976,6 +1982,7 @@ struct Game<'a> {
     /// The item panel beside container screens (`game/native_panel.rs`).
     panel: native_panel::Panel,
     owned_npcs: owned_npcs::OwnedNpcs,
+    civilization: civilization::Campaign,
     owned_npc_mirrors: Vec<owned_npc_net::MirrorNpc>,
     owned_npc_snapshot_tick: Option<(String, u64)>,
     /// Horizon's own shader pack, while one is picked (`game/native_shaders.rs`).
@@ -4560,6 +4567,12 @@ impl Game<'_> {
     /// One hand's turn in `startUseItem`: `useItemOn` the block aimed at,
     /// then `useItem`. Whether the click ends here (it acted or failed).
     fn use_hand(&mut self, block_hit: Option<&Hit>) -> Result<bool> {
+        if let Some(hit) = block_hit
+            && self.civ_use_charter(hit.pos)
+        {
+            self.swing_arm();
+            return Ok(true);
+        }
         // isSecondaryUseActive with something in either hand keeps blocks
         // from reacting.
         let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
@@ -5518,6 +5531,7 @@ impl Game<'_> {
         self.tick_command_extras();
         self.native_tick();
         self.tick_owned_npcs();
+        self.tick_civilization();
         self.tell_native_now();
         let camera_eye = self.camera_eye_height();
         let stick = self.pad_move();
@@ -12128,6 +12142,9 @@ impl Game<'_> {
         self.save_game_metadata()
     }
     fn save_game_metadata(&mut self) -> Result<()> {
+        if let Err(error) = self.save_civilization() {
+            log::warn!("Civilization save: {error}");
+        }
         if let Err(error) = self.save_owned_npcs() {
             log::warn!("Owned NPC save: {error}; continuing the vanilla world save");
         }
@@ -14775,6 +14792,7 @@ impl<'a> Game<'a> {
             recipe_tables: Default::default(),
             panel: Default::default(),
             owned_npcs: Default::default(),
+            civilization: Default::default(),
             owned_npc_mirrors: Vec::new(),
             owned_npc_snapshot_tick: None,
             native_shaders: Default::default(),

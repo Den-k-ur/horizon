@@ -2,7 +2,7 @@
 use super::{Game, execution_role::ExecutionRole};
 use horizon_client::owned_npc_actor::{self, Actor};
 use horizon_mods::owned_npcs::{
-    Appearance, EnsureNpc, Npc, Order, OrderStatus, Presence, Registry,
+    Appearance, EnsureNpc, MAX_PER_OWNER, Npc, Order, OrderStatus, Presence, Registry,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -101,6 +101,33 @@ impl Game<'_> {
 
     pub(super) fn prepare_owned_npcs(&mut self) {
         let _ = self.bind_owned_npcs();
+    }
+
+    /// Reserve no state, but reject permanent storage/quota failures before a
+    /// campaign accepts its founding payment. Unloaded and despawned identities
+    /// still occupy their registry slots.
+    pub(super) fn preflight_owned_npc_keys(
+        &mut self,
+        owner: &str,
+        keys: &[String],
+    ) -> Result<(), String> {
+        self.bind_owned_npcs()?;
+        let records: Vec<_> = self.owned_npcs.registry.records().collect();
+        let new_keys: std::collections::BTreeSet<_> = keys
+            .iter()
+            .filter(|key| {
+                !records
+                    .iter()
+                    .any(|npc| npc.owner == owner && npc.stable_key == key.as_str())
+            })
+            .collect();
+        let owned = records.iter().filter(|npc| npc.owner == owner).count();
+        if owned + new_keys.len() > MAX_PER_OWNER || records.len() + new_keys.len() > 4096 {
+            return Err(
+                "Нет свободных мест для представителей новой общины: достигнут лимит NPC".into(),
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn owned_npc_template(

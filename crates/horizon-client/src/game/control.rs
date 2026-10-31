@@ -269,6 +269,17 @@ impl Game<'_> {
             "owned-npc-mirrors" => Ok(Some(
                 json!({"count":self.owned_npc_mirrors.len(),"last_snapshot":self.owned_npc_snapshot_tick}),
             )),
+            "civilization-state" => {
+                self.require_world()?;
+                let value = if let Some(server) = &self.integrated {
+                    server
+                        .call(|g| g.civilization_status())
+                        .ok_or("Server stopped")?
+                } else {
+                    self.civilization_status()
+                };
+                Ok(Some(value))
+            }
             "owned-npcs" => {
                 self.require_world()?;
                 let input = line
