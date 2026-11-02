@@ -170,7 +170,26 @@ def main():
         assert not ctl('inventory')['counts'], 'Previously saved items resurrected after clearing inventory'
         assert state()['presence'] == 'despawned'
         check('an intentionally emptied inventory stays empty after restart without resurrecting items')
+        ctl('command', '/execute in minecraft:the_nether run tp @s 0.5 100 -5.5')
+        until(lambda: ctl('state')['dimension'] == 'minecraft:the_nether')
+        ctl('fill', -8, 100, -8, 12, 105, 12, 'minecraft:air')
+        ctl('fill', -8, 99, -8, 12, 99, 12, 'minecraft:stone')
+        ctl('tp', 0.5, 100, -5.5)
+        nether = dict(request, stable_key='nether_worker', dimension='minecraft:the_nether')
+        rpc('ensure', npc=nether)
+        until(lambda: ctl('owned-npc-mirrors')['count'] == 1)
+        rpc('set-order', key='nether_worker', order={
+            'kind': 'move-to', 'target': {'x': 5.5, 'y': 100.0, 'z': 0.5}, 'arrival_radius': 0.6})
+        moved = until(lambda: (
+            lambda n: n if n['order_status'] == 'complete' else None
+        )(rpc('state', key='nether_worker')['npc']))
+        assert abs(moved['position']['x'] - 5.5) < 0.61
+        rpc('despawn', key='nether_worker')
+        until(lambda: ctl('owned-npc-mirrors')['count'] == 0)
+        check('independent NPCs tick and replicate in the Nether server level')
         if args.leave_running:
+            ctl('command', '/execute in minecraft:overworld run tp @s 0.5 100 -5.5')
+            until(lambda: ctl('state')['dimension'] == 'minecraft:overworld')
             request['stable_key'] = 'demo_worker'
             request['profession'] = 'builder'
             rpc('ensure', npc=request)

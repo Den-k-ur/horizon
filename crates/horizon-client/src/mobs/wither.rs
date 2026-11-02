@@ -259,6 +259,7 @@ pub fn custom_server_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEven
                 mob: m.id,
                 charged: false,
                 name,
+                in_water: m.fluids.in_water,
             });
             events.push(MobEvent::Explode(
                 [m.position.x, m.eye_y(), m.position.z],
@@ -277,7 +278,7 @@ pub fn custom_server_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEven
         }
         m.extra.counter = left;
         if m.age.is_multiple_of(10) {
-            m.health = (m.health + 10.0).min(m.attrs.max_health);
+            m.heal(10.0);
         }
         return;
     }
@@ -403,7 +404,7 @@ pub fn custom_server_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEven
         }
     }
     if m.age.is_multiple_of(20) {
-        m.health = (m.health + 1.0).min(m.attrs.max_health);
+        m.heal(1.0);
     }
 }
 /// `WitherBoss.hurtServer` filter: not while charging, no arrows once

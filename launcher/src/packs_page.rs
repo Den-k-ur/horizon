@@ -67,7 +67,10 @@ impl Launcher {
             for file in &files {
                 added.push(packs::add(home, file)?.title);
             }
-            Ok(format!("Added {}: turn it on below.", added.join(", ")))
+            Ok(trf(
+                "Added {names}: turn it on below.",
+                &[("names", &added.join(", "))],
+            ))
         });
     }
 
@@ -76,7 +79,7 @@ impl Launcher {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Add".into()),
+            prompt: Some(tr("Add").into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
@@ -106,9 +109,9 @@ impl Launcher {
         let actions = div()
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(8.))
             .child(
-                button("packs-add", "Add pack…", Kind::Ghost, &t).on_click(cx.listener(
+                tab_action("packs-add", "Add pack…", &t).on_click(cx.listener(
                     |this, _: &ClickEvent, _, cx| {
                         this.choose_packs(cx);
                         cx.notify();
@@ -116,7 +119,7 @@ impl Launcher {
                 )),
             )
             .child(
-                button("packs-folder", "Open folder", Kind::Ghost, &t).on_click(move |_, _, cx| {
+                tab_action("packs-folder", "Open folder", &t).on_click(move |_, _, cx| {
                     let dir = home.join(PackKind::Resource.folder());
                     let _ = std::fs::create_dir_all(&dir);
                     cx.open_with_system(&dir);
@@ -140,38 +143,52 @@ impl Launcher {
                 cx.notify();
             }));
         match &self.game_packs.note {
-            Some(Ok(m)) => {
-                section = section.child(text(theme::CAPTION).text_color(t.muted).child(m.clone()))
-            }
+            Some(Ok(m)) => section = section.child(quiet_note(m.clone(), &t)),
             Some(Err(e)) => section = section.child(notice(e.clone(), &t)),
             None => {}
         }
         if self.client.is_some() {
-            section = section.child(text(theme::CAPTION).text_color(t.muted).child(
-                "The game is running: change packs in its own menus, or here once it is closed.",
+            section = section.child(quiet_note(
+                tr("The game is running: change packs in its own menus, or here once it is closed."),
+                &t,
             ));
         }
         let resource = self.game_packs.resource.clone();
-        section = section.child(caps("Resource packs").text_color(t.muted).mt(px(4.)));
+        // Each group's title and its empty line share a plate, like the rows below them.
+        let mut head = plate(&t)
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .px(px(12.))
+            .py(px(8.))
+            .mt(px(4.))
+            .child(caps(tr("Resource packs")).text_color(t.muted));
         if resource.is_empty() {
-            section = section.child(
-                text(theme::CAPTION)
-                    .text_color(t.muted)
-                    .child("None yet: drop a .zip here, or find some on the Mods page."),
-            );
+            head = head.child(text(theme::CAPTION).text_color(t.muted).child(tr(
+                "None yet: drop a .zip here, or find some on the Mods page.",
+            )));
         }
+        section = section.child(head);
         for (i, (pack, icon)) in resource.into_iter().enumerate() {
             section = section.child(self.pack_row(i, pack, icon, cx));
         }
         let shader = self.game_packs.shader.clone();
-        section = section.child(caps("Shader packs").text_color(t.muted).mt(px(8.)));
+        let mut head = plate(&t)
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .px(px(12.))
+            .py(px(8.))
+            .mt(px(8.))
+            .child(caps(tr("Shader packs")).text_color(t.muted));
         if shader.is_empty() {
-            section = section.child(
+            head = head.child(
                 text(theme::CAPTION)
                     .text_color(t.muted)
-                    .child("None yet: drop a .hshader or a shader pack .zip here."),
+                    .child(tr("None yet: drop a .hshader or a shader pack .zip here.")),
             );
         }
+        section = section.child(head);
         for (i, pack) in shader.into_iter().enumerate() {
             section = section.child(self.pack_row(i, pack, None, cx));
         }
@@ -219,7 +236,7 @@ impl Launcher {
                 .child(
                     text(theme::CAPTION)
                         .text_color(t.danger)
-                        .child("Move it to the trash?"),
+                        .child(tr("Move it to the trash?")),
                 )
                 .child(
                     button(id("keep"), "Keep", Kind::Ghost, &t).on_click(cx.listener(
@@ -234,8 +251,9 @@ impl Launcher {
                         cx.listener(move |this, _: &ClickEvent, _, cx| {
                             let gone = gone.clone();
                             this.pack_action(move |home| {
-                                packs::remove(home, &gone)
-                                    .map(|()| format!("{} moved to the trash.", gone.title))
+                                packs::remove(home, &gone).map(|()| {
+                                    trf("{name} moved to the trash.", &[("name", &gone.title)])
+                                })
                             });
                             cx.notify();
                         }),
@@ -252,8 +270,8 @@ impl Launcher {
                     this.pack_action(move |home| {
                         packs::set_enabled(home, &flip, !flip.enabled).map(|()| {
                             match flip.enabled {
-                                true => format!("{} is off.", flip.title),
-                                false => format!("{} is on.", flip.title),
+                                true => trf("{name} is off.", &[("name", &flip.title)]),
+                                false => trf("{name} is on.", &[("name", &flip.title)]),
                             }
                         })
                     });

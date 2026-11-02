@@ -324,7 +324,7 @@ impl Book {
                 Recipe::Special(special) => {
                     for shown in special.book_displays() {
                         entries.push(Entry {
-                            id: format!("minecraft:{name}"),
+                            id: crate::crafting::recipe_id(name),
                             display_id: -1,
                             category: crafting_category(&category),
                             group: group(&grp),
@@ -338,7 +338,7 @@ impl Book {
                 }
             };
             entries.push(Entry {
-                id: format!("minecraft:{name}"),
+                id: crate::crafting::recipe_id(name),
                 display_id: -1,
                 category: crafting_category(&category),
                 group: group(&grp),
@@ -359,7 +359,7 @@ impl Book {
                 _ => continue,
             };
             entries.push(Entry {
-                id: format!("minecraft:{}", c.id),
+                id: crate::crafting::recipe_id(&c.id),
                 display_id: -1,
                 category,
                 group: group(&c.group),
@@ -654,6 +654,7 @@ pub(crate) fn crafting_station(kind: &str) -> &'static str {
         "minecraft:smoking" => "minecraft:smoker",
         "minecraft:campfire_cooking" => "minecraft:campfire",
         "minecraft:stonecutting" => "minecraft:stonecutter",
+        "minecraft:brewing" => "minecraft:brewing_stand",
         "minecraft:smithing_transform" | "minecraft:smithing_trim" => "minecraft:smithing_table",
         _ => "minecraft:crafting_table",
     }
@@ -666,7 +667,10 @@ impl RecipeIndex {
         let mut insert = |id: String, v: &serde_json::Value| {
             let kind = v["type"].as_str().unwrap_or_default();
             let special = kind.starts_with("minecraft:crafting_special_")
-                || kind == "minecraft:crafting_decorated_pot";
+                || kind == "minecraft:crafting_decorated_pot"
+                // A brewing recipe has no recipe book display of its own
+                // (`BrewingRecipe`), so it never takes display numbers.
+                || kind == "minecraft:brewing";
             let displays = if special {
                 0
             } else if kind == "minecraft:crafting_transmute" {
@@ -690,32 +694,51 @@ impl RecipeIndex {
                     first_display: 0,
                     station: crafting_station(kind),
                     notify: v["show_notification"].as_bool().unwrap_or(true),
-                    result: v["result"]["id"].as_str().map(str::to_owned),
+                    result: horizon_world::loot::recipe_result_id(&v["result"]).map(str::to_owned),
                 },
             );
         };
         let dir = root.join("data/minecraft/recipe");
-        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
+        // NeoForge's load conditions: the book lists only what loaded; a
+        // recipe gated on an absent mod isn't in the manager either.
+        let mods: Vec<String> = {
+            let mut mods = horizon_items::content_namespaces::mod_ids(root);
+            if !mods.iter().any(|m| m == "minecraft") {
+                mods.push("minecraft".to_owned());
             }
-            let (Some(stem), Some(v)) = (
-                path.file_stem().and_then(|s| s.to_str()),
-                std::fs::read(&path)
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()),
-            ) else {
-                continue;
-            };
-            insert(format!("minecraft:{stem}"), &v);
-        }
-        // The world's packs' recipes over the game's own: the top pack's
-        // file for each id replaces it (`SimpleJsonResourceReloadListener`).
+            mods
+        };
+        let conditions_hold = |v: &serde_json::Value| {
+            horizon_world::conditions::conditions_hold(v, &|id: &str| mods.iter().any(|m| m == id))
+        };
+        // The whole folder, `brewing/` under it too, in id order
+        // (`SimpleJsonResourceReloadListener` walks it recursively): a
+        // subfolder's recipe keeps it in its id, `minecraft:brewing/<name>`.
+        // The packs' files replace first and the gate answers the merged
+        // file, as the crafting loader's does: a false-conditioned pack
+        // file leaves the lower one gone too.
+        let folder = crate::json_folder::read(&dir).ok();
+        let mut sources: Vec<(String, serde_json::Value)> = folder
+            .iter()
+            .flat_map(|folder| &folder.files)
+            .filter_map(|file| {
+                let v = serde_json::from_slice::<serde_json::Value>(file.bytes().ok()?).ok()?;
+                Some((format!("minecraft:{}", file.name), v))
+            })
+            .collect();
         for (id, files) in overlay.kind("recipe") {
             match serde_json::from_slice::<serde_json::Value>(PackOverlay::top(files)) {
-                Ok(v) => insert(id.to_owned(), &v),
+                Ok(v) => match sources.iter_mut().find(|(n, _)| n == id) {
+                    Some(slot) => slot.1 = v,
+                    None => sources.push((id.to_owned(), v)),
+                },
                 Err(e) => log::warn!("Horizon: pack recipe {id} not shown in the book: {e}"),
+            }
+        }
+        let filters = horizon_items::recipe_filters::RecipeFilters::load(root, overlay);
+        for (id, mut v) in sources {
+            if conditions_hold(&v) && filters.apply(&id, &mut v) {
+                insert(id, &v);
             }
         }
         // RecipeManager keeps its recipes sorted by id and numbers the displays in that order.
@@ -812,11 +835,15 @@ impl Settings {
         let mut displays = 0;
         let mut added = Vec::new();
         for id in ids {
-            if !self.recipes.contains(id) && !index.special(id) {
+            // The whole id: the crafting copy names a `minecraft:` recipe
+            // bare, and every reader of the book (the network copy, the
+            // advancements' JSON, the saved file) knows it qualified.
+            let id = crate::crafting::qualified(id);
+            if !self.recipes.contains(&id) && !index.special(&id) {
                 self.recipes.insert(id.clone());
                 self.to_be_displayed.insert(id.clone());
-                displays += index.displays(id);
-                added.push(id.clone());
+                displays += index.displays(&id);
+                added.push(id);
             }
         }
         (displays, added)
@@ -856,9 +883,10 @@ impl Settings {
     pub fn remove_recipes(&mut self, index: &RecipeIndex, ids: &[String]) -> Vec<i32> {
         let mut displays = Vec::new();
         for id in ids {
-            if self.recipes.remove(id) {
-                self.to_be_displayed.remove(id);
-                displays.extend(index.display_ids(id));
+            let id = crate::crafting::qualified(id);
+            if self.recipes.remove(&id) {
+                self.to_be_displayed.remove(&id);
+                displays.extend(index.display_ids(&id));
             }
         }
         displays
@@ -936,6 +964,24 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    /// A book saved before #7186's fix holds bare names: reading fills the
+    /// namespace in, so those recipes show in the book too.
+    #[test]
+    fn a_book_saved_with_bare_names_reads_qualified() {
+        use horizon_world::nbt::{Compound, Tag};
+        let list = || Tag::List(vec![Tag::String("folder_recipe".into())]);
+        let mut compound = Compound::new();
+        compound.insert("recipes".into(), list());
+        compound.insert("toBeDisplayed".into(), list());
+        let tag = Tag::Compound(compound);
+        let read = Settings::read_valid(Some(&tag), &|_| true);
+        assert_eq!(
+            read.recipes,
+            ["minecraft:folder_recipe".to_owned()].into_iter().collect()
+        );
+        assert!(read.to_be_displayed.contains("minecraft:folder_recipe"));
+    }
+
     use super::*;
 
     fn ing(items: &[&str]) -> Ingredient {

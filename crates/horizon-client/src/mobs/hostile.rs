@@ -64,8 +64,36 @@ pub fn register(m: &mut Mob) {
             m.ai.targets.add(1, HurtByTarget::new().alert());
             m.ai.targets.add(2, NearestTarget::player(true));
         }
+        // Endermite.registerGoals: the silverfish's list without the stone
+        // tricks, at vanilla's priorities (stroll 1.0, alert others on hurt).
+        S::Endermite => {
+            let g = &mut m.ai.goals;
+            g.add(1, Float);
+            g.add(1, ClimbOnTopOfPowderSnow);
+            g.add(2, MeleeAttack::new(1.0, false));
+            g.add(3, Stroll::avoiding_water(1.0));
+            g.add(7, LookAtPlayer::new(8.0));
+            g.add(8, RandomLookAround::default());
+            m.ai.targets.add(1, HurtByTarget::new().alert());
+            m.ai.targets.add(2, NearestTarget::player(true));
+        }
         _ => {}
     }
+}
+/// `InfestedBlock.isCompatibleHostBlock`: the blocks an infested block can
+/// be hidden in, i.e. the host side of vanilla's host-to-infested map. A
+/// silverfish prefers these as a walking target.
+pub fn is_infested_host(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:stone"
+            | "minecraft:cobblestone"
+            | "minecraft:stone_bricks"
+            | "minecraft:mossy_stone_bricks"
+            | "minecraft:cracked_stone_bricks"
+            | "minecraft:chiseled_stone_bricks"
+            | "minecraft:deepslate"
+    )
 }
 /// `Silverfish.hurtServer`: a hit by an entity (or magic damage) starts the
 /// countdown of its wake-up goal, kept in `extra.counter`.
@@ -338,12 +366,57 @@ pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
             mob: m.id,
             charged: m.extra.charged,
             name,
+            in_water: m.fluids.in_water,
         });
         events.push(MobEvent::Explode(
             [m.position.x, m.position.y, m.position.z],
             radius,
             m.species(),
         ));
+        // Creeper.spawnLingeringCloud: the effects it has make a cloud where it stood, after the
+        // blast. A hidden effect (`hideParticles`) takes no part in the cloud's colour.
+        if !m.extra.effects.is_empty() {
+            // The ids a potion's effects carry: vanilla ones without the namespace.
+            let effects: Vec<_> = m
+                .extra
+                .effects
+                .iter()
+                .map(|(id, ticks, amp)| (id.strip_prefix("minecraft:").unwrap_or(id), *ticks, *amp))
+                .collect();
+            let color = horizon_client_core::potions::effects_color(
+                effects
+                    .iter()
+                    .filter(|(id, ..)| !m.extra.hidden_effects.contains(id))
+                    .map(|(id, _, amp)| (*id, *amp)),
+            );
+            let hidden = effects
+                .iter()
+                .filter(|(id, ..)| {
+                    m.extra
+                        .hidden_effects
+                        .iter()
+                        .any(|h| h.strip_prefix("minecraft:").unwrap_or(h) == *id)
+                })
+                .map(|(id, ..)| *id)
+                .collect();
+            let ambient = effects
+                .iter()
+                .filter(|(id, ..)| {
+                    m.extra
+                        .ambient_effects
+                        .iter()
+                        .any(|h| h.strip_prefix("minecraft:").unwrap_or(h) == *id)
+                })
+                .map(|(id, ..)| *id)
+                .collect();
+            events.push(MobEvent::LingeringCloud {
+                at: [m.position.x, m.position.y, m.position.z],
+                effects,
+                hidden,
+                ambient,
+                color,
+            });
+        }
         m.removed = true;
     }
 }

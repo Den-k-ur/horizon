@@ -311,7 +311,9 @@ fn list_in(game_home: &Path, data: &Path) -> Vec<Instance> {
             .instances
             .retain(|id, _| id == DEFAULT || id.contains(':') || own.contains(id));
         if store.instances.len() != before {
-            let _ = store.save(data);
+            if let Err(e) = store.save(data) {
+                eprintln!("Horizon: instances.json is not saved: {e}");
+            }
         }
     }
     for slug in own {
@@ -443,6 +445,8 @@ const NOT_COPIED: &[&str] = &[
     "telemetry",
     "mod-browser",
     ".horizon-cache",
+    // Far terrain's copies of what servers sent, rebuilt as the instance plays.
+    "server-terrain",
 ];
 
 /// Files of the player, not of one instance, that a new instance starts with: the keys and video
