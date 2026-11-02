@@ -5,6 +5,13 @@ $game=Join-Path $packageDir 'horizon-client.exe'
 $ctl=Join-Path $packageDir 'horizon-ctl.exe'
 if(-not (Test-Path $game)){throw 'The compiled horizon-client.exe is missing.'}
 if(-not $Resources){
+    $resourceHint=Join-Path $packageDir 'resources-path.txt'
+    if(Test-Path -LiteralPath $resourceHint){
+        $candidate=(Get-Content -LiteralPath $resourceHint -Raw).Trim()
+        if($candidate -and (Test-Path -LiteralPath (Join-Path $candidate 'horizon-resources.json'))){$Resources=$candidate}
+    }
+}
+if(-not $Resources){
     $versionRoot=Join-Path $env:APPDATA 'horizon-launcher/versions'
     $settingsPath=Join-Path $env:APPDATA 'horizon-launcher/settings.json'
     if(Test-Path $settingsPath){

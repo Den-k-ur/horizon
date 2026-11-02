@@ -1,6 +1,6 @@
 # Owned NPC API — foundation for Civilization-style mods
 
-Status: experimental, implemented in this fork. Owned NPC extension **1**, alongside native hooks API **40**, exposes
+Status: experimental, implemented in this fork. Owned NPC extension **1**, alongside native hooks API **359**, exposes
 authoritative NPC helpers. The server creates independent actors, runs A*
 navigation and collision physics, and persists them in the world index. The
 integrated client renders separate, interpolated mirrors from bounded snapshots.
@@ -85,7 +85,7 @@ mod's scheduler, not to vanilla farming or an automatic registry timer.
   its production/yield changes from the reported task state.
 - Independent bodies are not yet vanilla combat/trading/pickup entities. There
   are no custom world interaction events, custom animation definitions or GUI.
-- Owned NPC extension 1 is specific to this fork; it is independent of upstream native hooks API 40.
+- Owned NPC extension 1 is specific to this fork; it is independent of upstream native hooks API 359.
 
 ## Real-client development harness
 
@@ -132,3 +132,5 @@ with the independent controller. These results do not imply that the complete
 Civilization gameplay mod has been ported to the current native-mod mechanism.
 
 Validation on 2026-10-31: the updated fork passed nine live NPC/save checks, including real A* movement, cancellation, despawn, owner inventory restoration with the campaign disabled, and an intentionally empty inventory staying empty. Civilization passed eight scenarios; two real clients passed six cooperation checks. See [build report](../civilization/BUILD-REPORT.ru.md).
+
+The 2026-11-02 integration also passed independent NPC movement and replication in the Nether, alongside ten NPC/save checks. See [sync report](../civilization/SYNC-2026-11-02.ru.md).
