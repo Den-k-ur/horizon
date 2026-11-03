@@ -7174,6 +7174,12 @@ impl Game<'_> {
         if self.mod_use_start() {
             return;
         }
+        if !self.spectator() && self.civ_click_resident() {
+            return;
+        }
+        if !self.spectator() && self.civ_click_charter() {
+            return;
+        }
         // Resolve the crosshair once. A passing entity interaction keeps
         // that target and may only fall back to using the item itself.
         let entity = self.entity_targeted();

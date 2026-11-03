@@ -1,8 +1,9 @@
 """Two real fork clients: attach our running elder proof and join a fresh LAN guest.
 
-The host is never quit or replaced. Supply the control socket of the isolated
+Without --lifecycle the host is never quit or replaced. Supply the control socket of the isolated
 CivilizationProof fixture produced by test_civilization_native.py --leave-running.
 Only the newly created guest home is launched/relaunched by this script.
+--lifecycle also tests membership, death, disk failure and a restart of this scratch host.
 """
 import argparse
 import copy
@@ -16,6 +17,16 @@ import time
 import uuid
 
 
+def without_survey_clocks(data):
+    for c in data['civilizations'].values():
+        a=c.get('governance',{}).get('assessment')
+        if a:a.pop('tick',None);a.pop('sample_tick',None)
+        population=c.get('population')
+        if population:
+            for field in ('last_tick','active_ticks','meal_in'):population.pop(field,None)
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('--host-socket', type=Path, required=True)
@@ -24,6 +35,7 @@ def main():
     parser.add_argument('--resources', type=Path, required=True)
     parser.add_argument('--proof-dir', type=Path, required=True)
     parser.add_argument('--leave-running', action='store_true')
+    parser.add_argument('--lifecycle', action='store_true')
     args = parser.parse_args()
     proof = args.proof_dir.resolve()
     proof.mkdir(parents=True, exist_ok=True)
@@ -92,7 +104,14 @@ def main():
     def campaign():
         result = ctl('host', 'civilization-state')
         assert result['enabled'] and not result.get('error'), result
-        return result['campaign']
+        data=result['campaign']
+        for c in data['civilizations'].values():
+            a=c.get('governance',{}).get('assessment')
+            if a:a.pop('tick',None);a.pop('sample_tick',None)
+            population=c.get('population')
+            if population:
+                for field in ('last_tick','active_ticks','meal_in'):population.pop(field,None)
+        return data
 
     def city():
         cities = campaign()['civilizations']
@@ -175,15 +194,14 @@ def main():
             assert joined[field] == initial_city[field], field
         assert counts().get('minecraft:paper', 0) == 1, 'Joining consumed a founding charter'
         command('guest', '/civ resources')
-        until(lambda: any(city_id in line and '60/60' in line for line in messages()),
+        until(lambda: any(city_id in line and '60/40' in line for line in messages()),
               message='guest shared elder overview')
-        assert any('жилых мест 6' in line for line in messages()), messages()
+        assert any('beds 3' in line for line in messages()),messages()
         check('the founder invites the guest; membership shares existing progress without granting duplicate rewards')
 
         before_member_invite = copy.deepcopy(campaign())
         command('guest', '/civ invite ' + foreign_uuid)
         assert campaign() == before_member_invite, 'An ordinary member invited another player'
-        assert any('основатель' in line.lower() for line in messages()), messages()
         check('ordinary members cannot grant membership to a third player')
 
         bell = joined['bell']
@@ -192,7 +210,7 @@ def main():
               message='three NPC mirrors on the external LAN client')
         quest = joined['quests'][0]
         npcs = ctl('host', 'owned-npcs', json.dumps({
-            'owner': 'civilization', 'command': {'operation': 'list'}}))['npcs']
+            'owner': campaign()['settlements'][city()['settlement_id']]['npc_owner'], 'command': {'operation': 'list'}}))['npcs']
         speaker = next(npc for npc in npcs if npc['stable_key'] == quest['npc_key'])
         position = speaker['position']
         ctl('guest', 'look-at', position['x'], position['y'] + 1, position['z'])
@@ -202,7 +220,7 @@ def main():
         before_restart = copy.deepcopy(campaign())
         before_inventory = counts()
         ctl('host', 'save')
-        assert json.loads(campaign_file.read_text(encoding='utf-8')) == before_restart
+        assert without_survey_clocks(json.loads(campaign_file.read_text(encoding='utf-8'))) == before_restart
         ctl('guest', 'quit')
         guest_launched = False
         until(lambda: all(guest['name'] != guest_name for guest in ctl('host', 'lan', 'status')['guests']),
@@ -217,13 +235,123 @@ def main():
         assert counts().get('minecraft:written_book', 0) == 1
         assert counts().get('minecraft:paper', 0) == 1
         command('guest', '/civ resources')
-        until(lambda: any(city_id in line and '60/60' in line for line in messages()),
+        until(lambda: any(city_id in line and '60/40' in line for line in messages()),
               message='restored guest campaign access')
         until(lambda: ctl('guest', 'owned-npc-mirrors')['count'] == 3,
               message='restored LAN NPC mirrors')
         ctl('host', 'save')
-        assert json.loads(campaign_file.read_text(encoding='utf-8')) == campaign()
+        assert without_survey_clocks(json.loads(campaign_file.read_text(encoding='utf-8'))) == campaign()
         check('guest process restart preserves UUID, membership, inventory and NPC mirrors; host campaign is on disk')
+        if args.lifecycle:
+            founder = initial_city['founder']
+            unchanged = copy.deepcopy(campaign())
+            command('guest', '/civ transfer ' + founder)
+            command('guest', '/civ kick ' + founder)
+            command('host', '/civ leave')
+            assert campaign() == unchanged
+            check('ordinary members cannot transfer or remove a leader and the last leader cannot abandon a city')
+
+            command('host', '/civ transfer ' + guest_uuid)
+            assert city()['leader'] == guest_uuid and city()['founder'] == founder
+            unchanged = copy.deepcopy(campaign())
+            command('host', '/civ invite ' + foreign_uuid)
+            assert campaign() == unchanged
+            command('guest', '/civ invite ' + foreign_uuid)
+            assert foreign_uuid in city()['invitations']
+            check('transferring leadership preserves the founder and moves authority to the authenticated new leader')
+
+            if os.name == 'nt':
+                import ctypes
+                kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                              ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                              ctypes.c_void_p]
+                kernel.CreateFileW.restype = ctypes.c_void_p
+                kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+                # READ access, shared READ|WRITE but not DELETE: actual rename must fail.
+                handle = kernel.CreateFileW(str(campaign_file), 0x80000000, 3, None, 3, 0, None)
+                assert handle not in (None, ctypes.c_void_p(-1).value), ctypes.get_last_error()
+                unchanged = copy.deepcopy(campaign())
+                disk = campaign_file.read_bytes()
+                try:
+                    command('guest', '/civ transfer ' + founder)
+                    assert campaign() == unchanged
+                    assert campaign_file.read_bytes() == disk
+                finally:
+                    kernel.CloseHandle(handle)
+                command('guest', '/civ transfer ' + founder)
+                assert city()['leader'] == founder
+                command('host', '/civ transfer ' + guest_uuid)
+                check('real filesystem replacement failure rolls back runtime authority; retry succeeds after unlocking')
+
+            command('guest', '/civ kick ' + founder)
+            assert founder not in city()['members'] and founder in city()['former_members']
+            assert city()['quests'] == initial_city['quests']
+            assert city()['recognition'] == 60 and city()['stage'] == 'elder'
+            command('guest', '/civ invite ' + founder)
+            command('host', '/civ join ' + city_id)
+            assert founder in city()['members'] and founder not in city()['former_members']
+            command('host', '/civ leave')
+            assert founder not in city()['members'] and founder in city()['former_members']
+            check('kick, rejoin and voluntary leave preserve completed projects while removing former member rights')
+
+            before_death = copy.deepcopy(campaign())
+            command('host', f'/gamemode survival {guest_name}')
+            command('host', f'/kill {guest_name}')
+            until(lambda: ctl('guest', 'screen')['screen'] == 'dead', message='guest death screen')
+            ctl('guest', 'respawn')
+            until(lambda: ctl('guest', 'screen')['screen'] == 'playing', message='guest respawn')
+            assert campaign() == before_death
+            assert counts().get('minecraft:written_book', 0) == 0
+            assert counts().get('minecraft:paper', 0) == 0
+            command('guest', '/civ resources')
+            assert campaign() == before_death
+            check('death and respawn retain UUID, leadership and campaign progress without granting a second starter kit')
+
+            # The former founder can now found an independent community in the same world.
+            ctl('host', 'tp', 200.5, 100, -2.5)
+            ctl('host', 'wait', 30)
+            ctl('host', 'fill', 188, 100, -12, 212, 106, 12, 'minecraft:air')
+            ctl('host', 'fill', 188, 99, -12, 212, 99, 12, 'minecraft:stone')
+            ctl('host', 'setblock', 200, 100, 0, 'minecraft:bell[attachment=floor,facing=north,powered=false]')
+            for z in (3, 5):
+                ctl('host', 'setblock', 203, 100, z, 'minecraft:red_bed[facing=east,part=foot,occupied=false]')
+                ctl('host', 'setblock', 204, 100, z, 'minecraft:red_bed[facing=east,part=head,occupied=false]')
+            command('host', '/summon minecraft:villager 205.5 100 1.5 {NoAI:1b,PersistenceRequired:1b}')
+            ctl('host', 'tp', 200.5, 100, -2.5)
+            ctl('host', 'wait', 3)
+            command('host', '/civ recover-kit')
+            ctl('host', 'select', 'minecraft:paper')
+            ctl('host', 'interact', 200, 100, 0, 'north')
+            until(lambda: len(campaign()['civilizations']) == 2, message='second independent civilization')
+            until(lambda:all(c['governance']['assessment'] is not None for c in campaign()['civilizations'].values()),message='both community surveys ready')
+            second_id = next(key for key in campaign()['civilizations'] if key != city_id)
+            assert second_id == 'civ-2'
+            assert campaign()['civilizations'][second_id]['leader'] == founder
+            assert campaign()['civilizations'][city_id]['leader'] == guest_uuid
+            unchanged = copy.deepcopy(campaign())
+            command('guest', '/civ transfer ' + founder)
+            command('guest', '/civ kick ' + founder)
+            assert campaign() == unchanged
+            check('two civilizations coexist with distinct stable IDs and reject cross-civilization authority changes')
+
+            ctl('guest', 'quit')
+            guest_launched = False
+            until(lambda: all(guest['name'] != guest_name
+                              for guest in ctl('host', 'lan', 'status')['guests']),
+                  message='final guest disconnect')
+            expected = copy.deepcopy(campaign())
+            ctl('host', 'save')
+            ctl('host', 'quit')
+            lan_opened = False
+            time.sleep(1)
+            ctl('host', 'launch', '--game', args.game.resolve(), '--world', 'CivilizationProof',
+                '--resources', args.resources.resolve(), '--no-pause', '--render-distance', 6,
+                '--wait', timeout=180)
+            until(lambda: campaign() == expected, message='both communities restored after host restart')
+            assert without_survey_clocks(json.loads(campaign_file.read_text(encoding='utf-8'))) == expected
+            assert expected['civilizations'][city_id]['quests'] == initial_city['quests']
+            check('host restart restores both communities, transferred leadership and historical contributor attribution')
         success = True
     except BaseException as exc:
         error = repr(exc)
@@ -240,6 +368,11 @@ def main():
                 ctl('host', 'lan', 'close')
             except Exception as cleanup_error:
                 transcript.append({'cleanup_lan_error': repr(cleanup_error)})
+        if args.lifecycle and not (success and args.leave_running):
+            try:
+                ctl('host', 'quit', timeout=20)
+            except Exception as cleanup_error:
+                transcript.append({'cleanup_host_error': repr(cleanup_error)})
         (proof / 'report.json').write_text(json.dumps({
             'success': success, 'error': error, 'checks': checks,
             'host_socket': str(host_socket), 'guest_home': str(guest_home),

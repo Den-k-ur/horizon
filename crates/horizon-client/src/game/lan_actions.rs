@@ -1148,6 +1148,28 @@ impl Game<'_> {
         self.lan = Some(host);
     }
 
+    /// Per-player tick actions whose system feedback must reach that player's client.
+    /// `for_each_player` deliberately does not route local UI chat into network packets.
+    pub(super) fn for_each_player_messaged(&mut self, mut f: impl FnMut(&mut Self)) {
+        if self.player.is_some() {
+            f(self);
+        }
+        let Some(mut host) = self.lan.take() else {
+            return;
+        };
+        let conns: Vec<_> = host
+            .hub
+            .guests
+            .iter()
+            .filter(|g| host.hub.here(g) && g.loaded && !g.dead)
+            .map(|g| g.conn)
+            .collect();
+        for conn in conns {
+            self.as_guest_messaged(&mut host, conn, &mut f);
+        }
+        self.lan = Some(host);
+    }
+
     /// The game mode fields without `set_mode`'s side effects on the host.
     fn set_mode_raw(&mut self, id: i32) {
         use horizon_client::command::args::GameMode;

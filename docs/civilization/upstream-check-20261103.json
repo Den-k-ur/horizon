@@ -1,0 +1,17 @@
+{
+  "upstream": "f42ef42ef6ceccb3c6a20bea2481d87949a51c81",
+  "base": "953fbd73c60dda8cdfd2fdeb951717065fa9414d",
+  "ahead": 1485,
+  "compareFilesLimit": 300,
+  "local": {
+    "hooks": 386,
+    "helpers": 113
+  },
+  "remote": {
+    "hooks": 386,
+    "helpers": 113
+  },
+  "hooksAdded": [],
+  "helpersAdded": [],
+  "forkHelpers": []
+}

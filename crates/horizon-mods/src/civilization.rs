@@ -4,12 +4,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-const VERSION: u32 = 1;
+pub mod economy;
+pub mod governance;
+pub mod needs;
+pub mod population;
+pub mod races;
+pub mod settlements;
+pub mod storage;
+
+const VERSION: u32 = 8;
 const MAX_PLAYERS: usize = 4096;
 const MAX_CIVILIZATIONS: usize = 256;
 const MAX_MEMBERS: usize = 64;
 pub const TERRITORY_RADIUS: i32 = 32;
-pub const GUIDE: &str = "Вы — посланник, а не правитель. Найдите деревню: колокол, не менее двух кроватей и один житель. Примените Хартию на колоколе, чтобы объявить ратушу. Поговорите с мастером, земледельцем и строителем; доставьте материалы по их заданиям. Три восстановленных объекта и 60 признания дадут звание старосты и откроют управление общими ресурсами. Ваши личные рецепты не ограничены технологиями цивилизации.";
+pub const GUIDE: &str = "horizon.civilization.guide.summary";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +58,8 @@ pub struct Quest {
     pub npc_key: String,
     pub materials: Vec<Material>,
     pub completed_by: Option<String>,
+    #[serde(default)]
+    pub delivery: Option<needs::Delivery>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,13 +76,29 @@ pub struct Civilization {
     pub id: String,
     pub name: String,
     pub founder: String,
+    /// The founder is historical; authority can pass to another current member.
+    #[serde(default)]
+    pub leader: String,
     pub members: BTreeSet<String>,
+    /// Preserve attribution when a contributor leaves, without retaining their rights.
+    #[serde(default)]
+    pub former_members: BTreeSet<String>,
     pub invitations: BTreeSet<String>,
     pub bell: Bell,
+    #[serde(default)]
+    pub settlement_id: String,
     pub recognition: u32,
     pub projects: u32,
     pub stage: Stage,
     pub quests: Vec<Quest>,
+    #[serde(default)]
+    pub needs: Option<needs::Plan>,
+    #[serde(default)]
+    pub governance: Option<governance::Governance>,
+    #[serde(default)]
+    pub economy: Option<economy::Store>,
+    #[serde(default)]
+    pub population: Option<population::Population>,
     /// Available only to the management stage; quest deliveries are spent rebuilding.
     /// They are not also credited as spendable treasury materials.
     pub resources: Resources,
@@ -84,6 +110,12 @@ pub struct Registry {
     version: u32,
     next_id: u32,
     introduced: BTreeSet<String>,
+    #[serde(default)]
+    choices: BTreeMap<String, races::Choice>,
+    #[serde(default)]
+    settlements: BTreeMap<String, settlements::Settlement>,
+    #[serde(default = "first_settlement")]
+    next_settlement: u32,
     civilizations: BTreeMap<String, Civilization>,
 }
 
@@ -93,9 +125,15 @@ impl Default for Registry {
             version: VERSION,
             next_id: 1,
             introduced: BTreeSet::new(),
+            choices: BTreeMap::new(),
+            settlements: BTreeMap::new(),
+            next_settlement: 1,
             civilizations: BTreeMap::new(),
         }
     }
+}
+fn first_settlement() -> u32 {
+    1
 }
 
 fn player_id(player: &str) -> Result<(), String> {
@@ -159,11 +197,153 @@ fn quests(id: &str) -> Vec<Quest> {
             })
             .collect(),
         completed_by: None,
+        delivery: None,
     })
     .collect()
 }
 
 impl Registry {
+    pub fn settlements(&self) -> impl Iterator<Item = &settlements::Settlement> {
+        self.settlements.values()
+    }
+    pub fn settlement(&self, id: &str) -> Option<&settlements::Settlement> {
+        self.settlements.get(id)
+    }
+    pub fn settlement_at(&self, bell: &Bell) -> Option<&settlements::Settlement> {
+        self.settlements.values().find(|s| s.bell == *bell)
+    }
+    pub fn race_choices(&self) -> impl Iterator<Item = (&String, &races::Choice)> {
+        self.choices.iter()
+    }
+    pub fn compass_target(&self, player: &str) -> Option<&Bell> {
+        self.civilization_for(player).map(|c| &c.bell).or_else(|| {
+            self.choices
+                .get(player)
+                .and_then(|c| c.settlement_id.as_ref())
+                .and_then(|id| self.settlements.get(id))
+                .map(|s| &s.bell)
+        })
+    }
+    fn add_settlement(
+        &mut self,
+        bell: Bell,
+        race: Option<races::Race>,
+        biome: String,
+        kind: settlements::Kind,
+    ) -> Result<String, String> {
+        if !valid_bell(&bell) {
+            return Err("horizon.civilization.settlement.invalid".into());
+        }
+        if let Some(town) = self.settlement_at(&bell) {
+            return Ok(town.id.clone());
+        }
+        if self.settlements.len() >= 512
+            || self.settlements.values().any(|s| overlaps(&s.bell, &bell))
+        {
+            return Err("horizon.civilization.settlement.occupied".into());
+        }
+        if kind == settlements::Kind::Generated
+            && self
+                .settlements
+                .values()
+                .filter(|s| s.status == settlements::Status::Building)
+                .count()
+                >= 4
+        {
+            return Err("horizon.civilization.race.busy".into());
+        }
+        let next = self
+            .next_settlement
+            .checked_add(1)
+            .ok_or("Settlement IDs exhausted")?;
+        let id = format!("town-{}", self.next_settlement);
+        let town = settlements::Settlement::new(id.clone(), bell, race, biome, kind);
+        if !town.valid() {
+            return Err("horizon.civilization.settlement.invalid".into());
+        }
+        self.settlements.insert(id.clone(), town);
+        self.next_settlement = next;
+        Ok(id)
+    }
+    pub fn register_settlement(&mut self, bell: Bell) -> Result<String, String> {
+        self.add_settlement(bell, None, String::new(), settlements::Kind::Adopted)
+    }
+    pub fn start_building(&mut self, id: &str) {
+        if let Some(t) = self.settlements.get_mut(id)
+            && t.status == settlements::Status::Building
+        {
+            t.building_started = true;
+        }
+    }
+    pub fn finish_building(&mut self, id: &str) {
+        if let Some(t) = self.settlements.get_mut(id)
+            && t.status == settlements::Status::Building
+            && t.building_started
+        {
+            t.status = settlements::Status::Ready;
+        }
+    }
+    pub fn block_settlement(&mut self, id: &str) {
+        if let Some(t) = self.settlements.get_mut(id)
+            && t.status == settlements::Status::Building
+        {
+            t.status = settlements::Status::Blocked;
+        }
+    }
+    pub fn race_choice(&self, player: &str) -> Option<&races::Choice> {
+        self.choices.get(player)
+    }
+
+    pub fn choose_race(
+        &mut self,
+        player: &str,
+        race: races::Race,
+        start: races::Start,
+    ) -> Result<(), String> {
+        if !self.has_started(player) || !start.valid(race) {
+            return Err("horizon.civilization.race.invalid_start".into());
+        }
+        let mut arriving = true;
+        if let Some(choice) = self.choices.get(player) {
+            let retry = choice
+                .settlement_id
+                .as_ref()
+                .and_then(|id| self.settlements.get(id))
+                .is_some_and(|t| t.status == settlements::Status::Blocked);
+            if choice.race != race || choice.settlement_id.is_some() && !retry {
+                return Err("horizon.civilization.race.locked".into());
+            }
+            arriving = choice.arriving;
+        }
+        let town = self.add_settlement(
+            start.settlement.clone(),
+            Some(race),
+            start.biome.clone(),
+            settlements::Kind::Generated,
+        )?;
+        if self.settlements[&town].claimed_by.is_some()
+            || self.settlements[&town].race != Some(race)
+        {
+            return Err("horizon.civilization.settlement.occupied".into());
+        }
+        self.choices.insert(
+            player.into(),
+            races::Choice {
+                race,
+                start,
+                arriving,
+                settlement_id: Some(town),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn finish_race_arrival(&mut self, player: &str) {
+        if let Some(choice) = self.choices.get_mut(player) {
+            choice.arriving = false;
+        }
+    }
+
     /// Returns true once per world/player. Persist only together with the granted starter kit.
     pub fn begin_player(&mut self, player: &str) -> Result<bool, String> {
         player_id(player)?;
@@ -235,17 +415,33 @@ impl Registry {
             .next_id
             .checked_add(1)
             .ok_or("Исчерпаны идентификаторы")?;
+        let town_id = self.register_settlement(bell.clone())?;
+        let town = &self.settlements[&town_id];
+        if town.status != settlements::Status::Ready || town.claimed_by.is_some() {
+            return Err("horizon.civilization.settlement.not_ready".into());
+        }
+        let mut city_quests = quests(&id);
+        for (quest, key) in city_quests.iter_mut().zip(&town.residents) {
+            quest.npc_key = key.clone();
+        }
         let civilization = Civilization {
             id: id.clone(),
             name: name.into(),
             founder: player.into(),
+            leader: player.into(),
             members: BTreeSet::from([player.into()]),
+            former_members: BTreeSet::new(),
             invitations: BTreeSet::new(),
             bell,
+            settlement_id: town_id.clone(),
             recognition: 0,
             projects: 0,
             stage: Stage::Recognition,
-            quests: quests(&id),
+            quests: city_quests,
+            needs: None,
+            governance: Some(governance::Governance::default()),
+            economy: Some(economy::Store::default()),
+            population: Some(population::Population::new(&town.residents)),
             resources: Resources {
                 wood: 0,
                 food: 0,
@@ -254,6 +450,12 @@ impl Registry {
         };
         self.next_id = next_id;
         self.civilizations.insert(id.clone(), civilization);
+        let town = self.settlements.get_mut(&town_id).unwrap();
+        town.claimed_by = Some(id.clone());
+        town.status = settlements::Status::PotentialCapital;
+        if let Some(choice) = self.choices.get_mut(player) {
+            choice.arriving = false;
+        }
         self.clear_invitations(player);
         Ok(id)
     }
@@ -264,8 +466,8 @@ impl Registry {
             return Err("Игрок уже состоит в цивилизации".into());
         }
         let civ = self.civilization_for_mut(actor)?;
-        if civ.founder != actor {
-            return Err("Приглашать может только основатель общины".into());
+        if civ.leader != actor {
+            return Err("horizon.civilization.error.leader_only".into());
         }
         if civ.invitations.contains(other) {
             return Ok(());
@@ -292,6 +494,7 @@ impl Registry {
             return Err("Нет приглашения или община заполнена".into());
         }
         civ.invitations.remove(player);
+        civ.former_members.remove(player);
         civ.members.insert(player.into());
         self.clear_invitations(player);
         Ok(())
@@ -301,6 +504,43 @@ impl Registry {
         for civilization in self.civilizations.values_mut() {
             civilization.invitations.remove(player);
         }
+    }
+
+    pub fn transfer_leadership(&mut self, actor: &str, other: &str) -> Result<(), String> {
+        let civ = self.civilization_for_mut(actor)?;
+        if civ.leader != actor {
+            return Err("horizon.civilization.error.leader_only".into());
+        }
+        if !civ.members.contains(other) {
+            return Err("horizon.civilization.error.current_member".into());
+        }
+        civ.leader = other.into();
+        Ok(())
+    }
+
+    pub fn leave(&mut self, player: &str) -> Result<(), String> {
+        let civ = self.civilization_for_mut(player)?;
+        if civ.leader == player {
+            return Err("horizon.civilization.error.transfer_first".into());
+        }
+        civ.members.remove(player);
+        civ.former_members.insert(player.into());
+        Ok(())
+    }
+
+    pub fn remove_member(&mut self, actor: &str, other: &str) -> Result<(), String> {
+        let civ = self.civilization_for_mut(actor)?;
+        if civ.leader != actor {
+            return Err("horizon.civilization.error.leader_only".into());
+        }
+        if civ.leader == other {
+            return Err("horizon.civilization.error.transfer_first".into());
+        }
+        if !civ.members.remove(other) {
+            return Err("horizon.civilization.error.current_member".into());
+        }
+        civ.former_members.insert(other.into());
+        Ok(())
     }
 
     pub fn quest(&self, player: &str, id: &str) -> Result<&Quest, String> {
@@ -322,6 +562,10 @@ impl Registry {
     /// Callers must not expose this acknowledgement directly to a network/client request.
     pub fn complete_quest(&mut self, player: &str, id: &str) -> Result<(), String> {
         self.quest(player, id)?;
+        if self.quest(player, id)?.delivery.is_some() {
+            let receipt = self.quest(player, id)?.remaining();
+            return self.record_delivery(player, id, &receipt).map(|_| ());
+        }
         let civ = self.civilization_for_mut(player)?;
         let quest = civ
             .quests
@@ -331,10 +575,6 @@ impl Registry {
         quest.completed_by = Some(player.into());
         civ.recognition += 20;
         civ.projects += 1;
-        if civ.recognition >= 60 && civ.projects >= 3 {
-            civ.stage = Stage::Elder;
-            civ.resources.housing = 6;
-        }
         Ok(())
     }
 
@@ -354,7 +594,114 @@ impl Registry {
         if bytes.len() > 4 * 1024 * 1024 {
             return Err("Сохранение цивилизаций слишком велико".into());
         }
-        let registry: Self = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let mut registry: Self = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        if registry.version == 1 {
+            for civ in registry.civilizations.values_mut() {
+                // A legacy save cannot smuggle new authority or historical membership.
+                if !civ.leader.is_empty() || !civ.former_members.is_empty() {
+                    return Err("Invalid version 1 membership data".into());
+                }
+                civ.leader.clone_from(&civ.founder);
+            }
+            registry.version = 2;
+        }
+        if registry.version == 2 {
+            if !registry.choices.is_empty() {
+                return Err("Invalid version 2 race data".into());
+            }
+            registry.version = 3;
+        }
+        if registry.version == 3 {
+            if !registry.settlements.is_empty()
+                || registry.next_settlement != 1
+                || registry.choices.values().any(|c| c.settlement_id.is_some())
+                || registry
+                    .civilizations
+                    .values()
+                    .any(|c| !c.settlement_id.is_empty())
+            {
+                return Err("Invalid version 3 settlement data".into());
+            }
+            for city in registry.civilizations.values_mut() {
+                let town = settlements::Settlement::legacy(city);
+                city.settlement_id = town.id.clone();
+                registry.settlements.insert(town.id.clone(), town);
+            }
+            for (player, choice) in &mut registry.choices {
+                if !choice.arriving
+                    && let Some(city) = registry
+                        .civilizations
+                        .values()
+                        .find(|c| c.members.contains(player))
+                {
+                    choice.settlement_id = Some(city.settlement_id.clone());
+                }
+            }
+            registry.version = 4;
+        }
+        if registry.version == 4 {
+            if registry
+                .civilizations
+                .values()
+                .any(|c| c.needs.is_some() || c.quests.iter().any(|q| q.delivery.is_some()))
+            {
+                return Err("Invalid version 4 quest data".into());
+            }
+            registry.version = 5;
+        }
+        if registry.version == 5 {
+            for c in registry.civilizations.values_mut() {
+                let elder = c.quests.iter().all(|q| q.completed_by.is_some());
+                if c.governance.is_some()
+                    || (c.stage == Stage::Elder) != elder
+                    || c.resources.housing
+                        != if elder {
+                            c.needs.as_ref().map_or(6, |p| u32::from(p.beds))
+                        } else {
+                            0
+                        }
+                {
+                    return Err("Invalid version 5 title data".into());
+                }
+                c.governance = Some(governance::Governance {
+                    legacy_title: elder,
+                    ..Default::default()
+                });
+            }
+            registry.version = 6;
+        }
+        if registry.version == 6 {
+            for c in registry.civilizations.values_mut() {
+                if c.economy.is_some()
+                    || c.governance
+                        .as_ref()
+                        .and_then(|g| g.grant.as_ref())
+                        .is_some_and(|g| g.food > 256)
+                {
+                    return Err("Invalid version 6 economy data".into());
+                }
+                c.economy = Some(economy::Store::migrate(c));
+            }
+            registry.version = 7;
+        }
+        if registry.version == 7 {
+            for c in registry.civilizations.values_mut() {
+                if c.population.is_some()
+                    || c.economy.as_ref().is_none_or(|s| {
+                        s.consumed.keys().any(|id| id != "minecraft:oak_log")
+                            || s.produced.keys().any(|id| id != "minecraft:oak_planks")
+                    })
+                {
+                    return Err("Invalid version 7 population data".into());
+                }
+                let town = registry
+                    .settlements
+                    .get(&c.settlement_id)
+                    .ok_or("Invalid settlement")?;
+                c.population = Some(population::Population::new(&town.residents));
+            }
+            registry.version = VERSION;
+        }
         registry.validate()?;
         Ok(registry)
     }
@@ -364,11 +711,57 @@ impl Registry {
             || self.next_id == 0
             || self.introduced.len() > MAX_PLAYERS
             || self.civilizations.len() > MAX_CIVILIZATIONS
+            || self.settlements.len() > 512
+            || self.next_settlement == 0
         {
             return Err("Неподдерживаемое или повреждённое сохранение цивилизаций".into());
         }
         for player in &self.introduced {
             player_id(player)?;
+        }
+        for (player, choice) in &self.choices {
+            if !self.introduced.contains(player) || !choice.start.valid(choice.race) {
+                return Err("Invalid race choice or start".into());
+            }
+            if let Some(id) = &choice.settlement_id {
+                let town = self
+                    .settlements
+                    .get(id)
+                    .ok_or("Missing navigation settlement")?;
+                if town.kind != settlements::Kind::Legacy && town.bell != choice.start.settlement {
+                    return Err("Navigation settlement does not match start".into());
+                }
+                if town.race.is_some_and(|r| r != choice.race) {
+                    return Err("Invalid settlement race".into());
+                }
+            }
+        }
+        let mut town_bells = Vec::new();
+        for (id, town) in &self.settlements {
+            if *id != town.id || !town.valid() || town_bells.iter().any(|b| overlaps(b, &town.bell))
+            {
+                return Err("Invalid settlement registry".into());
+            }
+            if town.kind != settlements::Kind::Legacy {
+                let serial = id
+                    .strip_prefix("town-")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .ok_or("Invalid settlement ID")?;
+                if serial == 0 || serial >= self.next_settlement || *id != format!("town-{serial}")
+                {
+                    return Err("Invalid settlement sequence".into());
+                }
+            }
+            if let Some(city) = &town.claimed_by {
+                if self
+                    .civilizations
+                    .get(city)
+                    .is_none_or(|c| c.settlement_id != *id || c.bell != town.bell)
+                {
+                    return Err("Invalid settlement claim".into());
+                }
+            }
+            town_bells.push(town.bell.clone());
         }
         let mut members = BTreeSet::new();
         let mut bells = Vec::new();
@@ -388,15 +781,29 @@ impl Registry {
                 || civ.name.chars().any(char::is_control)
                 || civ.members.is_empty()
                 || civ.members.len() + civ.invitations.len() > MAX_MEMBERS
-                || !civ.members.contains(&civ.founder)
+                || !civ.members.contains(&civ.leader)
+                || !civ.members.contains(&civ.founder) && !civ.former_members.contains(&civ.founder)
+                || !civ.members.is_disjoint(&civ.former_members)
                 || bells.iter().any(|b| overlaps(b, &civ.bell))
             {
                 return Err("Повреждённые данные общины".into());
             }
             bells.push(civ.bell.clone());
+            let town = self
+                .settlements
+                .get(&civ.settlement_id)
+                .ok_or("Missing capital settlement")?;
+            if town.claimed_by.as_ref() != Some(id) || town.bell != civ.bell {
+                return Err("Invalid capital binding".into());
+            }
             for member in &civ.members {
                 if !self.introduced.contains(member) || !members.insert(member) {
                     return Err("Повторное или неизвестное членство".into());
+                }
+            }
+            for former in &civ.former_members {
+                if !self.introduced.contains(former) {
+                    return Err("Unknown historical member".into());
                 }
             }
             for invitation in &civ.invitations {
@@ -405,7 +812,17 @@ impl Registry {
                     return Err("Участник не может иметь приглашение в свою общину".into());
                 }
             }
-            let canonical = quests(id);
+            if civ.needs.as_ref().is_some_and(|plan| !plan.valid()) {
+                return Err("Invalid settlement needs".into());
+            }
+            let mut canonical = civ
+                .needs
+                .as_ref()
+                .map(|p| p.quests(&town.residents))
+                .unwrap_or_else(|| quests(id));
+            for (quest, key) in canonical.iter_mut().zip(&town.residents) {
+                quest.npc_key = key.clone();
+            }
             if canonical.len() != civ.quests.len() {
                 return Err("Повреждённый набор заданий".into());
             }
@@ -416,33 +833,36 @@ impl Registry {
                     || expected.role != actual.role
                     || expected.npc_key != actual.npc_key
                     || expected.materials != actual.materials
+                    || if civ.needs.is_some() {
+                        !actual.valid_delivery(&civ.members, &civ.former_members)
+                    } else {
+                        actual.delivery.is_some()
+                    }
                 {
                     return Err("Несовместимое определение задания".into());
                 }
                 if let Some(by) = &actual.completed_by {
-                    if !civ.members.contains(by) {
+                    if !civ.members.contains(by) && !civ.former_members.contains(by) {
                         return Err("Неизвестный исполнитель задания".into());
                     }
                     completed += 1;
                 }
             }
-            let elder = completed == 3;
             if civ.projects != completed
                 || civ.recognition != completed * 20
-                || civ.stage
-                    != if elder {
-                        Stage::Elder
-                    } else {
-                        Stage::Recognition
-                    }
-                || civ.resources
-                    != (Resources {
-                        wood: 0,
-                        food: 0,
-                        housing: if elder { 6 } else { 0 },
-                    })
+                || civ.resources.wood != 0
+                || civ.resources.food != 0
+                || !civ.valid_governance()
+                || civ.economy.as_ref().is_none_or(|s| !s.valid())
+                || civ
+                    .population
+                    .as_ref()
+                    .is_none_or(|p| !p.valid(civ, &self.settlements[&civ.settlement_id].residents))
             {
-                return Err("Прогресс не соответствует выполненным заданиям".into());
+                return Err(
+                    "Прогресс не соответствует выполненным заданиям или подтверждённым условиям"
+                        .into(),
+                );
             }
         }
         Ok(())
@@ -530,14 +950,14 @@ mod tests {
         let civ = state.civilization_for("uuid-b").unwrap();
         assert_eq!(
             (civ.recognition, civ.projects, civ.stage),
-            (60, 3, Stage::Elder)
+            (60, 3, Stage::Recognition)
         );
         assert_eq!(
             civ.resources,
             Resources {
                 wood: 0,
                 food: 0,
-                housing: 6
+                housing: 0
             }
         );
     }
@@ -644,7 +1064,7 @@ mod tests {
             assert!(Registry::restore(&serde_json::to_vec(&forged).unwrap()).is_err());
         }
         let mut future = valid.clone();
-        future["version"] = serde_json::json!(2);
+        future["version"] = serde_json::json!(VERSION + 1);
         assert!(Registry::restore(&serde_json::to_vec(&future).unwrap()).is_err());
         let mut bad_cost = valid.clone();
         bad_cost["civilizations"]["civ-1"]["quests"][0]["materials"][0]["count"] =
@@ -658,5 +1078,141 @@ mod tests {
         duplicate.civilizations.insert("civ-2".into(), other);
         duplicate.next_id = 3;
         assert!(duplicate.save().is_err());
+    }
+
+    #[test]
+    fn leadership_and_departure_preserve_history_but_revoke_authority() {
+        let mut state = founded();
+        state.begin_player("uuid-b").unwrap();
+        state.invite("uuid-a", "uuid-b").unwrap();
+        state.join("uuid-b", "civ-1").unwrap();
+        state.complete_quest("uuid-a", "quarry").unwrap();
+        assert!(state.leave("uuid-a").is_err());
+        state.transfer_leadership("uuid-a", "uuid-b").unwrap();
+        state.leave("uuid-a").unwrap();
+        let mut restored = Registry::restore(&state.save().unwrap()).unwrap();
+        let city = restored.civilization("civ-1").unwrap();
+        assert_eq!(city.founder, "uuid-a");
+        assert_eq!(city.leader, "uuid-b");
+        assert_eq!(city.quests[0].completed_by.as_deref(), Some("uuid-a"));
+        assert_eq!((city.recognition, city.projects), (20, 1));
+        assert!(restored.civilization_for("uuid-a").is_none());
+        assert!(restored.invite("uuid-a", "uuid-c").is_err());
+        assert!(restored.complete_quest("uuid-a", "granary").is_err());
+        restored.invite("uuid-b", "uuid-a").unwrap();
+        restored.join("uuid-a", "civ-1").unwrap();
+        assert!(
+            !restored
+                .civilization("civ-1")
+                .unwrap()
+                .former_members
+                .contains("uuid-a")
+        );
+        assert!(restored.complete_quest("uuid-a", "quarry").is_err());
+        restored.remove_member("uuid-b", "uuid-a").unwrap();
+        assert_eq!(
+            Registry::restore(&restored.save().unwrap()).unwrap(),
+            restored
+        );
+    }
+
+    #[test]
+    fn membership_changes_cannot_target_other_civilizations_or_the_last_leader() {
+        let mut state = founded();
+        state.begin_player("uuid-b").unwrap();
+        state.found("uuid-b", "B", bell(300), village()).unwrap();
+        let before = state.clone();
+        assert!(state.transfer_leadership("uuid-a", "uuid-b").is_err());
+        assert!(state.remove_member("uuid-a", "uuid-b").is_err());
+        assert!(state.remove_member("uuid-a", "uuid-a").is_err());
+        assert!(state.leave("uuid-a").is_err());
+        assert_eq!(state, before);
+        let mut restored = Registry::restore(&state.save().unwrap()).unwrap();
+        restored.begin_player("uuid-c").unwrap();
+        assert_eq!(
+            restored.found("uuid-c", "C", bell(600), village()).unwrap(),
+            "civ-3"
+        );
+        assert_eq!(restored.civilizations().count(), 3);
+        assert_eq!(restored.civilization_for("uuid-b").unwrap().name, "B");
+    }
+
+    #[test]
+    fn forged_leadership_and_historical_membership_are_rejected() {
+        let valid = serde_json::to_value(founded()).unwrap();
+        for (field, replacement) in [
+            ("leader", serde_json::json!("unknown")),
+            ("former_members", serde_json::json!(["unknown"])),
+            ("former_members", serde_json::json!(["uuid-a"])),
+        ] {
+            let mut forged = valid.clone();
+            forged["civilizations"]["civ-1"][field] = replacement;
+            assert!(Registry::restore(&serde_json::to_vec(&forged).unwrap()).is_err());
+        }
+        let mut mislabeled = valid;
+        mislabeled["version"] = 1.into();
+        assert!(Registry::restore(&serde_json::to_vec(&mislabeled).unwrap()).is_err());
+    }
+
+    fn desert_start() -> races::Start {
+        races::Start {
+            settlement: bell(300),
+            structure: "minecraft:village_desert".into(),
+            position: [332, 65, 0],
+            biome: "minecraft:desert".into(),
+        }
+    }
+
+    #[test]
+    fn race_choice_survives_reload_and_departure_and_cannot_be_overwritten() {
+        let mut state = founded();
+        state
+            .choose_race("uuid-a", races::Race::DesertCat, desert_start())
+            .unwrap();
+        let mut state = Registry::restore(&state.save().unwrap()).unwrap();
+        assert!(state.race_choice("uuid-a").unwrap().arriving);
+        let before = state.clone();
+        assert!(
+            state
+                .choose_race("uuid-a", races::Race::DesertCat, desert_start())
+                .is_err()
+        );
+        assert_eq!(state, before);
+        state.finish_race_arrival("uuid-a");
+        state.begin_player("uuid-b").unwrap();
+        state.invite("uuid-a", "uuid-b").unwrap();
+        state.join("uuid-b", "civ-1").unwrap();
+        state.transfer_leadership("uuid-a", "uuid-b").unwrap();
+        state.leave("uuid-a").unwrap();
+        let restored = Registry::restore(&state.save().unwrap()).unwrap();
+        let choice = restored.race_choice("uuid-a").unwrap();
+        assert_eq!(choice.race, races::Race::DesertCat);
+        assert!(!choice.arriving);
+        assert_eq!(choice.start.position, [332, 65, 0]);
+        assert!(restored.race_choice("uuid-b").is_none());
+    }
+
+    #[test]
+    fn race_start_rejects_wrong_habitat_coordinates_and_unknown_players() {
+        let mut state = founded();
+        let before = state.clone();
+        assert!(
+            state
+                .choose_race("unknown", races::Race::DesertCat, desert_start())
+                .is_err()
+        );
+        assert!(
+            state
+                .choose_race("uuid-a", races::Race::Human, desert_start())
+                .is_err()
+        );
+        let mut start = desert_start();
+        start.position[0] = i32::MAX;
+        assert!(
+            state
+                .choose_race("uuid-a", races::Race::DesertCat, start)
+                .is_err()
+        );
+        assert_eq!(state, before);
     }
 }

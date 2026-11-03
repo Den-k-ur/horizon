@@ -73,7 +73,7 @@ def main():
         nonlocal launched
         words = ['launch', '--game', args.game.resolve(), '--world', 'CivilizationProof',
                  '--seed', '42', '--creative', '--wait', '--resources', args.resources.resolve(),
-                 '--no-pause', '--render-distance', '6']
+                 '--no-pause', '--offscreen', '--render-distance', '6']
         if enable:
             words.append('--civilization')
         # Even if readiness fails, cleanup targets only this newly allocated home.
@@ -84,7 +84,14 @@ def main():
         result = ctl('civilization-state')
         assert result['enabled'], result
         assert not result.get('error'), result
-        return result['campaign']
+        data=result['campaign']
+        for c in data['civilizations'].values():
+            a=c.get('governance',{}).get('assessment')
+            if a:a.pop('tick',None);a.pop('sample_tick',None)
+            population=c.get('population')
+            if population:
+                for field in ('last_tick','active_ticks','meal_in'):population.pop(field,None)
+        return data
 
     def city():
         cities = campaign()['civilizations']
@@ -100,7 +107,7 @@ def main():
         return result
 
     def npcs():
-        return ctl('owned-npcs', json.dumps({'owner': 'civilization',
+        return ctl('owned-npcs', json.dumps({'owner': campaign()['settlements'][city()['settlement_id']]['npc_owner'],
                     'command': {'operation': 'list'}}, separators=(',', ':')))['npcs']
 
     def near(quest):
@@ -131,15 +138,38 @@ def main():
         check('new player receives a readable guide and a marked founding charter once')
 
         # Fixture only: an isolated player-built village with two complete beds
-        # and a stationary ambient villager. No generated-village claim is made.
+        # without any vanilla villager. No generated-village claim is made.
         ctl('fill', -12, 100, -12, 12, 106, 12, 'minecraft:air')
         ctl('fill', -12, 99, -12, 12, 99, 12, 'minecraft:stone')
         ctl('setblock', 0, 100, 0, 'minecraft:bell[attachment=floor,facing=north,powered=false]')
         for z in (3, 5):
             ctl('setblock', 3, 100, z, 'minecraft:red_bed[facing=east,part=foot,occupied=false]')
             ctl('setblock', 4, 100, z, 'minecraft:red_bed[facing=east,part=head,occupied=false]')
-        command('/summon minecraft:villager 5.5 100 1.5 {NoAI:1b,PersistenceRequired:1b}')
         ctl('tp', 0.5, 100, -2.5)
+        ctl('select','minecraft:paper')
+        ctl('setblock',3,100,5,'minecraft:air')
+        ctl('interact',0,100,0,'north');ctl('wait',3)
+        assert not campaign()['civilizations'] and counts().get('minecraft:paper')==1
+        ctl('setblock',3,100,5,'minecraft:red_bed[facing=east,part=foot,occupied=false]')
+        ctl('setblock',4,100,5,'minecraft:red_bed[facing=east,part=head,occupied=false]')
+        ctl('tp',20.5,100,-2.5)
+        ctl('wait',5)
+        command('/civ charter 0 100 0')
+        assert not campaign()['civilizations'] and counts().get('minecraft:paper')==1
+        try:
+            ctl('interact',0,100,0,'north')
+            raise AssertionError('distant interaction should be refused')
+        except RuntimeError as refusal:
+            assert 'out of reach' in str(refusal),refusal
+        ctl('wait',3)
+        assert not campaign()['civilizations'] and counts().get('minecraft:paper')==1
+        ctl('tp',0.5,100,-2.5)
+        ctl('wait',5)
+        for y in (100,101,102):ctl('setblock',0,y,-1,'minecraft:stone')
+        command('/civ charter 0 100 0')
+        assert not campaign()['civilizations'] and counts().get('minecraft:paper')==1
+        for y in (100,101,102):ctl('setblock',0,y,-1,'minecraft:air')
+        check('incomplete beds and distant or obstructed server requests cannot found or consume the charter')
         ctl('select', 'minecraft:paper')
         ctl('wait', 3)
         ctl('interact', 0, 100, 0, 'north')
@@ -165,14 +195,15 @@ def main():
         command('/civ deliver quarry')
         assert city()['recognition'] == 0
         assert counts() == before_failed, 'Insufficient delivery consumed a partial cost'
-        check('insufficient delivery changes neither project progress nor any inventory items')
+        check('unrelated items change neither project progress nor inventory')
 
-        ctl('give', 'minecraft:cobblestone', 32)
-        until(lambda: counts().get('minecraft:cobblestone', 0) == 32)
+        assert quarry['materials']==[{'item':'minecraft:cobblestone','count':24},{'item':'minecraft:stone_pickaxe','count':1}],quarry
+        ctl('give','minecraft:cobblestone',24)
+        ctl('give','minecraft:stone_pickaxe',1)
+        until(lambda: counts().get('minecraft:stone_pickaxe',0)==1)
         command('/civ deliver quarry')
         assert city()['recognition'] == 20 and city()['projects'] == 1
-        until(lambda: counts().get('minecraft:oak_log', 0) == 0
-              and counts().get('minecraft:cobblestone', 0) == 0)
+        until(lambda: counts().get('minecraft:oak_log',0)==16 and counts().get('minecraft:cobblestone',0)==0 and counts().get('minecraft:stone_pickaxe',0)==0)
         assert city()['resources']['wood'] == 0, 'Spent rebuilding materials became duplicate treasury resources'
         check('full delivery consumes real materials once and awards one project and twenty recognition')
 
@@ -185,21 +216,25 @@ def main():
         assert counts() == before_duplicate
         check('a repeated completed quest grants no reward and consumes no second payment')
 
-        for quest_id, item, count in [('granary', 'minecraft:wheat', 24),
-                                     ('housing', 'minecraft:oak_planks', 32)]:
-            quest = next(q for q in city()['quests'] if q['id'] == quest_id)
+        for quest_id, expected in [('granary',[('minecraft:bread',12)]),('housing',[('minecraft:oak_planks',6),('minecraft:white_wool',6)])]:
+            quest=next(q for q in city()['quests'] if q['id']==quest_id)
+            assert quest['materials']==[{'item':item,'count':n} for item,n in expected],quest
             near(quest)
-            ctl('give', item, count)
-            until(lambda: counts().get(item, 0) == count)
-            command('/civ deliver ' + quest_id)
-            until(lambda: counts().get(item, 0) == 0)
+            for item,n in expected:ctl('give',item,n)
+            until(lambda:all(counts().get(item,0)==n for item,n in expected))
+            command('/civ deliver '+quest_id)
+            until(lambda:all(counts().get(item,0)==0 for item,n in expected))
+        for x,block in [(6,'minecraft:crafting_table'),(7,'minecraft:furnace')]:ctl('setblock',x,100,1,block)
+        ctl('setblock',3,100,7,'minecraft:red_bed[facing=east,part=foot,occupied=false]')
+        ctl('setblock',4,100,7,'minecraft:red_bed[facing=east,part=head,occupied=false]')
+        until(lambda:city()['stage']=='elder',timeout=40,message='observed infrastructure and stable title checks')
         elder = city()
         assert elder['stage'] == 'elder' and elder['recognition'] == 60 and elder['projects'] == 3
         assert all(q['completed_by'] for q in elder['quests'])
-        assert elder['resources'] == {'wood': 0, 'food': 0, 'housing': 6}
+        assert elder['resources'] == {'wood': 0, 'food': 0, 'housing': 3}
         command('/civ resources')
         ctl('screenshot', proof / 'civilization-elder.png')
-        check('three completed projects unlock elder status and the shared resource overview')
+        check('completed help plus real infrastructure and stable conditions unlock the Elder title')
 
         before_restart = copy.deepcopy(campaign())
         before_inventory = counts()
@@ -231,7 +266,7 @@ def main():
         (proof / 'report.json').write_text(json.dumps({
             'success': success, 'error': error, 'checks': checks, 'home': str(home),
             'socket': str(socket), 'game': str(args.game.resolve()),
-            'fixture': 'player-built village, two complete beds, one stationary ambient villager',
+            'fixture': 'player-built bell and two beds, no vanilla villager; own residents',
             'transcript': transcript}, ensure_ascii=False, indent=2), encoding='utf-8')
     print(str(proof / 'report.json'), flush=True)
 

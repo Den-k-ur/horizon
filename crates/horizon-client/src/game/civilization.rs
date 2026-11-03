@@ -1,16 +1,20 @@
 //! Opt-in, server-owned first campaign slice. No client-supplied inventory or progress.
 use super::{Game, execution_role::ExecutionRole};
-use horizon_client::text::{ClickEvent, Style, Text};
+use horizon_client::text::Text;
 use horizon_mods::{
-    civilization::{Bell, Civilization, Registry, Stage, VillageEvidence},
-    owned_npcs::{Appearance, EnsureNpc, Position, Presence},
+    civilization::{Bell, Registry, Stage, VillageEvidence, storage},
+    owned_npcs::Presence,
 };
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct Campaign {
-    registry: Registry,
+    pub(super) registry: Registry,
+    pub(super) searches: std::collections::BTreeMap<String, super::civilization_start::Search>,
+    pub(super) start_errors: std::collections::BTreeMap<String, String>,
+    pub(super) survey_attempts: std::collections::BTreeMap<String, i64>,
+    pub(super) new_elders: std::collections::BTreeSet<String>,
     path: Option<PathBuf>,
     error: Option<String>,
 }
@@ -29,20 +33,14 @@ impl Game<'_> {
         if !self.options.civilization && !path.exists() {
             return;
         }
-        let registry = match fs::metadata(&path) {
-            Ok(meta) if meta.len() > 4 * 1024 * 1024 => Err("Campaign exceeds 4 MiB".into()),
-            Ok(_) => fs::read(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|b| Registry::restore(&b)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
-            Err(e) => Err(e.to_string()),
-        };
+        let registry = storage::load(&path);
         match registry {
             Ok(registry) => {
                 self.civilization = Campaign {
                     registry,
                     path: Some(path),
                     error: None,
+                    ..Default::default()
                 };
                 if let Err(error) = self.save_civilization() {
                     self.civilization.error = Some(error);
@@ -66,15 +64,14 @@ impl Game<'_> {
         let Some(path) = &self.civilization.path else {
             return Ok(());
         };
-        let bytes = self.civilization.registry.save()?;
-        let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
-        fs::rename(temporary, path).map_err(|e| e.to_string())
+        storage::save(path, &self.civilization.registry)
     }
 
     pub(super) fn civilization_status(&self) -> Value {
         let mut status = json!({"enabled": self.civilization_enabled(),
-            "campaign": self.civilization.registry});
+            "campaign": self.civilization.registry,
+            "start_searches": self.civilization.searches.iter().map(|(player,search)| (player.clone(),search.phase())).collect::<std::collections::BTreeMap<_,_>>(),
+            "start_errors": self.civilization.start_errors});
         if let Some(error) = &self.civilization.error {
             status["error"] = error.clone().into();
         }
@@ -85,21 +82,16 @@ impl Game<'_> {
         if !self.civilization_enabled() || !self.ticks.is_multiple_of(20) {
             return;
         }
-        self.for_each_player(|g| {
+        self.civ_poll_race_searches();
+        self.civ_tick_settlements();
+        self.civ_tick_council();
+        self.civ_tick_population();
+        self.for_each_player_messaged(|g| {
             let _ = g.civ_introduce();
+            g.civ_tick_start();
+            g.civ_title_notice();
         });
-        let cities: Vec<_> = self
-            .civilization
-            .registry
-            .civilizations()
-            .filter(|c| c.bell.dimension == self.dim.id())
-            .cloned()
-            .collect();
-        for city in cities {
-            if let Err(error) = self.civ_ensure_speakers(&city) {
-                log::debug!("Civilization speakers: {error}");
-            }
-        }
+        self.civilization.new_elders.clear();
     }
 
     fn civ_introduce(&mut self) -> Result<(), String> {
@@ -127,71 +119,56 @@ impl Game<'_> {
         result
     }
 
-    fn civ_ensure_speakers(&mut self, city: &Civilization) -> Result<(), String> {
-        if !self.world.loaded(city.bell.x, city.bell.z) {
-            return Ok(());
-        }
-        for (index, quest) in city.quests.iter().enumerate() {
-            if self.owned_npc_state("civilization", &quest.npc_key).is_ok() {
-                continue;
-            }
-            // Only stand on solid ground with two air blocks. Never clear village blocks.
-            let mut spawn = None;
-            'search: for radius in 2_i32..=8 {
-                for dx in -radius..=radius {
-                    for dz in -radius..=radius {
-                        if dx.abs().max(dz.abs()) != radius
-                            || (dx + dz).rem_euclid(3) != index as i32
-                        {
-                            continue;
-                        }
-                        for dy in -4..=4 {
-                            let [x, y, z] = [city.bell.x + dx, city.bell.y + dy, city.bell.z + dz];
-                            if !self.world.loaded(x, z) {
-                                continue;
-                            }
-                            let facts = self.res.facts();
-                            if facts.is_air(self.world.block(x, y, z))
-                                && facts.is_air(self.world.block(x, y + 1, z))
-                                && facts.get(self.world.block(x, y - 1, z)).solid_render
-                            {
-                                spawn = Some(Position {
-                                    x: f64::from(x) + 0.5,
-                                    y: f64::from(y),
-                                    z: f64::from(z) + 0.5,
-                                });
-                                break 'search;
-                            }
-                        }
-                    }
-                }
-            }
-            let spawn =
-                spawn.ok_or("Нет безопасного места для представителя общины рядом с ратушей")?;
-            self.ensure_owned_npc(
-                "civilization",
-                EnsureNpc {
-                    stable_key: quest.npc_key.clone(),
-                    definition: "civilization:representative".into(),
-                    city: city.id.clone(),
-                    profession: quest.role.clone(),
-                    appearance: Appearance {
-                        model: "minecraft:entity/villager".into(),
-                        texture: "minecraft:entity/villager/villager".into(),
-                    },
-                    dimension: city.bell.dimension.clone(),
-                    spawn,
-                },
-            )?;
-        }
-        Ok(())
-    }
-
     fn civ_found(&mut self, pos: [i32; 3], name: &str) -> Result<String, String> {
         if !self.civ_has_charter() {
             return Err("Нужна учредительная грамота из стартового набора".into());
         }
-        let (beds, residents) = self.civ_village_evidence(pos)?;
+        let beds = self.civ_village_evidence(pos)?;
+        if beds < 2 {
+            return Err("horizon.civilization.settlement.beds".into());
+        }
+        let player = self.civ_player_id();
+        if self
+            .civilization
+            .registry
+            .civilization_for(&player)
+            .is_some()
+        {
+            return Err("horizon.civilization.settlement.member".into());
+        }
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 48 || name.chars().any(char::is_control) {
+            return Err("Название должно содержать от 1 до 48 печатных символов".into());
+        }
+        let bell = Bell {
+            dimension: self.dim.id().into(),
+            x: pos[0],
+            y: pos[1],
+            z: pos[2],
+        };
+        let old = self.civilization.registry.clone();
+        let town_id = self.civilization.registry.register_settlement(bell)?;
+        let town = self
+            .civilization
+            .registry
+            .settlement(&town_id)
+            .unwrap()
+            .clone();
+        if town.status != horizon_mods::civilization::settlements::Status::Ready
+            || town.claimed_by.is_some()
+        {
+            self.civilization.registry = old;
+            return Err("horizon.civilization.settlement.not_ready".into());
+        }
+        if let Err(error) = self.save_civilization() {
+            self.civilization.registry = old;
+            return Err(error);
+        }
+        self.civ_ensure_residents(&town)?;
+        let residents = self.civ_resident_count(&town);
+        if residents < 1 {
+            return Err("horizon.civilization.settlement.no_space".into());
+        }
         let player = self.civ_player_id();
         let old = self.civilization.registry.clone();
         let inventory = self.inventory.clone();
@@ -210,17 +187,10 @@ impl Game<'_> {
                 residents: residents.min(u32::from(u16::MAX)) as u16,
             },
         )?;
-        let keys = self
+        let result = self
             .civilization
             .registry
-            .civilization(&id)
-            .unwrap()
-            .quests
-            .iter()
-            .map(|q| q.npc_key.clone())
-            .collect::<Vec<_>>();
-        let result = self
-            .preflight_owned_npc_keys("civilization", &keys)
+            .activate_needs(&id, residents as u16, beds.min(4096) as u16)
             .and_then(|_| self.civ_consume_charter())
             .and_then(|_| self.save_civilization());
         if let Err(error) = result {
@@ -229,16 +199,8 @@ impl Game<'_> {
             self.offhand = offhand;
             return Err(error);
         }
-        let city = self
-            .civilization
-            .registry
-            .civilization(&id)
-            .unwrap()
-            .clone();
-        // Pending speakers retry on the server tick if a chunk is not ready.
-        let _ = self.civ_ensure_speakers(&city);
         Ok(format!(
-            "Община «{name}» основана ({id}). Колокол объявлен ратушей. Вы пока гость: заслужите признание жителей. /civ quests"
+            "Община «{name}» основана ({id}). Колокол объявлен ратушей. Вы — основатель: заслужите признание жителей, чтобы стать Старостой. /civ quests"
         ))
     }
 
@@ -260,8 +222,8 @@ impl Game<'_> {
         true
     }
 
-    fn civ_near_speaker(&mut self, key: &str) -> Result<(), String> {
-        let npc = self.owned_npc_state("civilization", key)?;
+    pub(super) fn civ_near_speaker(&mut self, owner: &str, key: &str) -> Result<(), String> {
+        let npc = self.owned_npc_state(owner, key)?;
         let p = self.player.as_ref().ok_or("Нет игрока")?.position;
         if npc.dimension != self.dim.id()
             || npc.presence != Presence::Loaded
@@ -270,7 +232,31 @@ impl Game<'_> {
                 + (p.z - npc.position.z).powi(2)
                 > 64.0
         {
-            return Err(format!("Подойдите к жителю {key} ближе 8 блоков"));
+            return Err("horizon.civilization.quest.too_far".into());
+        }
+        if self.spectator()
+            || self
+                .player
+                .as_ref()
+                .is_none_or(|p| p.health.health() <= 0.0)
+        {
+            return Err("horizon.civilization.quest.unavailable".into());
+        }
+        let eye = self
+            .eye_position()
+            .ok_or("horizon.civilization.quest.unavailable")?;
+        let delta = [
+            npc.position.x - eye[0],
+            npc.position.y + 1.0 - eye[1],
+            npc.position.z - eye[2],
+        ];
+        let distance = delta.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if distance > 0.01
+            && self
+                .clip_ray(eye, delta.map(|v| v / distance), distance - 0.05)
+                .is_some()
+        {
+            return Err("horizon.civilization.quest.obstructed".into());
         }
         Ok(())
     }
@@ -281,10 +267,54 @@ impl Game<'_> {
         let mut words = command.split_whitespace();
         words.next();
         match words.next().unwrap_or("status") {
-            "help" | "guide" => Ok(format!(
-                "{}\n/civ quests — задания; /civ talk quarry|granary|housing — разговор рядом с жителем; /civ deliver ID — передать все материалы; /civ status — признание; /civ invite UUID; /civ join ID. Ваш UUID: {player}",
-                horizon_mods::civilization::GUIDE
-            )),
+            "race" => {
+                if words.next() != Some("choose") {
+                    return Ok("horizon.civilization.race.help".into());
+                }
+                let race = words
+                    .next()
+                    .and_then(horizon_mods::civilization::races::Race::parse)
+                    .ok_or("horizon.civilization.race.help")?;
+                if words.next().is_some() {
+                    return Err("horizon.civilization.race.help".into());
+                }
+                self.civ_request_race(race)
+            }
+            "settlement" => {
+                if words.next() != Some("retry") || words.next().is_some() {
+                    return Err("horizon.civilization.settlement.help".into());
+                }
+                let choice = self
+                    .civilization
+                    .registry
+                    .race_choice(&player)
+                    .ok_or("horizon.civilization.race.help")?;
+                let race = choice.race;
+                if choice
+                    .settlement_id
+                    .as_ref()
+                    .and_then(|id| self.civilization.registry.settlement(id))
+                    .is_none_or(|t| {
+                        t.status != horizon_mods::civilization::settlements::Status::Blocked
+                    })
+                {
+                    return Err("horizon.civilization.settlement.not_blocked".into());
+                }
+                self.civ_request_race(race)
+            }
+            "compass" => {
+                if words.next().is_some() {
+                    return Err("horizon.civilization.race.help".into());
+                }
+                self.civ_recover_compass()
+            }
+            "guide" => self.civ_recover_guide(),
+            "help" => {
+                self.system_message(Text::tr("horizon.civilization.membership.help", &[]));
+                self.system_message(Text::tr(horizon_mods::civilization::GUIDE, &[]));
+                self.system_message(Text::tr("horizon.civilization.quest.help", &[&player]));
+                Ok("horizon.civilization.quest.list_hint".into())
+            }
             "id" => Ok(player),
             "recover-kit" => {
                 if self
@@ -313,121 +343,112 @@ impl Game<'_> {
                     },
                 )
             }
-            "status" | "resources" => {
-                let Some(city) = self.civilization.registry.civilization_for(&player) else {
-                    return Ok("Найдите деревню с колоколом, двумя кроватями и жителем. Используйте на колоколе учредительную грамоту. /civ help".into());
-                };
-                let status = format!(
-                    "{} [{}] — {}. Признание {}/60; общественные проекты {}/3. Участников: {}.",
-                    city.name,
-                    city.id,
-                    if city.stage == Stage::Elder {
-                        "Староста"
-                    } else {
-                        "Гость общины"
-                    },
-                    city.recognition,
-                    city.projects,
-                    city.members.len()
-                );
-                if city.stage == Stage::Elder {
-                    Ok(format!(
-                        "{status}\nОбщий склад: дерево {}, еда {}; жилых мест {}. Производство будет следующим этапом.",
-                        city.resources.wood, city.resources.food, city.resources.housing
-                    ))
-                } else {
-                    Ok(format!(
-                        "{status}\nГородской учёт откроется после признания. /civ quests"
-                    ))
+            "charter" => {
+                let mut position = [0_i32; 3];
+                for coordinate in &mut position {
+                    *coordinate = words
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("horizon.civilization.settlement.charter_usage")?;
                 }
+                if words.next().is_some() || !self.civ_holds_charter() {
+                    return Err("horizon.civilization.settlement.charter_usage".into());
+                }
+                self.civ_found(position, "Новая община")
             }
-            "quests" => {
+            "status" | "resources" => {
                 let city = self
                     .civilization
                     .registry
                     .civilization_for(&player)
-                    .ok_or("Сначала основать общину или вступить по приглашению")?
+                    .ok_or("horizon.civilization.quest.no_city")?
                     .clone();
-                for quest in &city.quests {
-                    let text = if quest.completed_by.is_some() {
-                        format!("✓ {} — выполнено", quest.title)
-                    } else {
-                        let pos = self
-                            .owned_npc_state("civilization", &quest.npc_key)
-                            .ok()
-                            .map(|n| {
-                                format!(
-                                    " [{:.0} {:.0} {:.0}]",
-                                    n.position.x, n.position.y, n.position.z
-                                )
-                            })
-                            .unwrap_or_default();
-                        format!("{}: {}{} — [поговорить]", quest.id, quest.title, pos)
-                    };
-                    let style = Style {
-                        click: Some(ClickEvent::RunCommand(format!("/civ talk {}", quest.id))),
-                        ..Default::default()
-                    };
-                    self.system_message(Text::literal(text).with_style(&style));
-                }
-                Ok("Материалы передаются только рядом с соответствующим жителем; повторная награда исключена.".into())
-            }
-            "talk" | "deliver" => {
-                let operation = command.split_whitespace().nth(1).unwrap();
-                let id = words.next().ok_or("Укажите quarry, granary или housing")?;
-                let quest = self.civilization.registry.quest(&player, id)?.clone();
-                self.civ_near_speaker(&quest.npc_key)?;
-                if operation == "talk" {
-                    return Ok(format!(
-                        "{}: {}. Нужно: {}. Награда: 20 признания и 1 общественный проект. Передать: /civ deliver {}",
-                        quest.role,
-                        quest.title,
-                        quest
-                            .materials
-                            .iter()
-                            .map(|m| format!("{} ×{}", m.item, m.count))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        id
+                let role = if city.stage == Stage::Elder && city.leader == player {
+                    "elder"
+                } else if city.founder == player {
+                    "founder"
+                } else {
+                    "member"
+                };
+                let total = city.quests.len() as u32;
+                self.system_message(Text::translate(
+                    "horizon.civilization.status.summary",
+                    &[
+                        Text::literal(city.name.clone()),
+                        Text::tr(&format!("horizon.civilization.status.{role}"), &[]),
+                        Text::literal(city.recognition.to_string()),
+                        Text::literal(
+                            horizon_mods::civilization::governance::RECOGNITION_REQUIRED
+                                .to_string(),
+                        ),
+                        Text::literal(city.projects.to_string()),
+                        Text::literal(total.to_string()),
+                        Text::literal(city.members.len().to_string()),
+                        Text::literal(city.id.clone()),
+                    ],
+                ));
+                if let Some(m) = city.metrics() {
+                    self.system_message(Text::tr(
+                        "horizon.civilization.council.population",
+                        &[
+                            &m.population,
+                            &m.beds,
+                            &m.housing_occupied,
+                            &m.housing_free,
+                            &m.food,
+                            &m.food_target,
+                        ],
                     ));
                 }
-                let old = self.civilization.registry.clone();
-                let inventory = self.inventory.clone();
-                let offhand = self.offhand.clone();
-                self.civ_take_materials(
-                    &quest
-                        .materials
-                        .iter()
-                        .map(|m| (m.item.clone(), m.count))
-                        .collect::<Vec<_>>(),
-                )?;
-                let result = self
-                    .civilization
-                    .registry
-                    .complete_quest(&player, id)
-                    .and_then(|_| self.save_civilization());
-                if let Err(error) = result {
-                    self.civilization.registry = old;
-                    self.inventory = inventory;
-                    self.offhand = offhand;
-                    return Err(error);
+                self.system_message(
+                    Text::tr("horizon.civilization.council.open", &[]).with_style(
+                        &horizon_client::text::Style {
+                            click: Some(horizon_client::text::ClickEvent::RunCommand(
+                                "/civ panel".into(),
+                            )),
+                            ..Default::default()
+                        },
+                    ),
+                );
+                Ok("horizon.civilization.quest.list_hint".into())
+            }
+            "quests" => self.civ_list_quests(),
+            "panel" => {
+                let page = words.next().unwrap_or("overview");
+                if words.next().is_some() {
+                    return Err("horizon.civilization.council.usage".into());
                 }
-                let elder = self
-                    .civilization
-                    .registry
-                    .civilization_for(&player)
-                    .unwrap()
-                    .stage
-                    == Stage::Elder;
-                Ok(format!(
-                    "{}: материалы приняты. +20 признания. {}",
-                    quest.title,
-                    if elder {
-                        "Община признала вас Старостой! Открыт городской учёт: /civ resources"
-                    } else {
-                        "/civ status"
-                    }
-                ))
+                self.civ_panel(page)
+            }
+            "provision" => {
+                if words.next().is_some() {
+                    return Err("horizon.civilization.council.usage".into());
+                }
+                self.civ_provision()
+            }
+            "stock" => self.civ_stock_command(&words.collect::<Vec<_>>()),
+            "workers" => self.civ_workers_command(&words.collect::<Vec<_>>()),
+            "govern" => {
+                let op = words.next().ok_or("horizon.civilization.council.usage")?;
+                let target = words.next().ok_or("horizon.civilization.council.usage")?;
+                if words.next().is_some() {
+                    return Err("horizon.civilization.council.usage".into());
+                }
+                self.civ_govern(op, target)
+            }
+            "talk" | "deliver" | "resident" => {
+                let operation = command.split_whitespace().nth(1).unwrap();
+                let argument = words.next().ok_or("horizon.civilization.quest.usage")?;
+                if words.next().is_some() {
+                    return Err("horizon.civilization.quest.usage".into());
+                }
+                if operation == "resident" {
+                    self.civ_talk_resident(argument)
+                } else if operation == "talk" {
+                    self.civ_talk_quest(argument)
+                } else {
+                    self.civ_deliver_quest(argument)
+                }
             }
             "invite" | "join" => {
                 let operation = command.split_whitespace().nth(1).unwrap();
@@ -449,14 +470,59 @@ impl Game<'_> {
                 }
                 .into())
             }
+            action @ ("leave" | "kick" | "transfer") => {
+                let other = if action == "leave" {
+                    None
+                } else {
+                    Some(
+                        words
+                            .next()
+                            .ok_or("horizon.civilization.error.member_usage")?,
+                    )
+                };
+                if words.next().is_some() {
+                    return Err("horizon.civilization.error.member_usage".into());
+                }
+                let old = self.civilization.registry.clone();
+                match action {
+                    "leave" => self.civilization.registry.leave(&player)?,
+                    "kick" => self
+                        .civilization
+                        .registry
+                        .remove_member(&player, other.unwrap())?,
+                    _ => self
+                        .civilization
+                        .registry
+                        .transfer_leadership(&player, other.unwrap())?,
+                }
+                if let Err(error) = self.save_civilization() {
+                    self.civilization.registry = old;
+                    log::warn!("Civilization membership change was rolled back: {error}");
+                    return Err("horizon.civilization.error.save_failed".into());
+                }
+                Ok(match action {
+                    "leave" => "horizon.civilization.membership.left",
+                    "kick" => "horizon.civilization.membership.removed",
+                    _ => "horizon.civilization.membership.transferred",
+                }
+                .into())
+            }
             _ => Err("Неизвестная команда. /civ help".into()),
         }
     }
 
-    fn civ_reply(&mut self, result: Result<String, String>) {
+    pub(super) fn civ_reply(&mut self, result: Result<String, String>) {
+        let message = |value: String| {
+            if value.starts_with("horizon.civilization.") {
+                Text::tr(&value, &[])
+            } else {
+                Text::literal(value)
+            }
+        };
         match result {
-            Ok(text) => self.system_message(Text::literal(text)),
-            Err(error) => self.command_failure(Text::literal(error)),
+            Ok(text) if text.is_empty() => {}
+            Ok(text) => self.system_message(message(text)),
+            Err(error) => self.command_failure(message(error)),
         }
     }
 

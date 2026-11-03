@@ -13,7 +13,7 @@ pub(super) const HELP: &[&str] = &[
     "container X Y Z [ITEM COUNT]   list a container, or add items to it",
 ];
 
-fn parse_state(text: &str) -> Result<BlockState> {
+pub(super) fn parse_state(text: &str) -> Result<BlockState> {
     let (name, props) = match text.split_once('[') {
         Some((name, rest)) => (name, rest.trim_end_matches(']')),
         None => (text, ""),
